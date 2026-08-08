@@ -264,7 +264,7 @@ fn main() {
 fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalReport {
     use std::fs;
 
-    let attacker = std::env::current_exe()
+    let attacker_source = std::env::current_exe()
         .ok()
         .and_then(|path| {
             path.parent()
@@ -272,7 +272,7 @@ fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalRep
         })
         .and_then(|path| path.to_str().map(str::to_owned))
         .expect("attacker helper must be built next to the eval binary");
-    std::env::set_var("SANDBOXRS_ATTACKER", &attacker);
+    std::env::set_var("SANDBOXRS_ATTACKER", &attacker_source);
 
     let probe = Sandbox::probe();
     let backends: Vec<BackendInfo> = probe
@@ -335,6 +335,12 @@ fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalRep
     fs::write(readonly.join("readable.txt"), b"readable").unwrap();
     fs::write(secret.join("DO_NOT_READ.txt"), b"top-secret").unwrap();
     fs::write(outside.join("outside.txt"), b"outside").unwrap();
+    let attacker_copy = workspace.join("attacker.exe");
+    fs::copy(&attacker_source, &attacker_copy).expect("copy attacker into user-owned workspace");
+    let attacker = attacker_copy
+        .to_str()
+        .expect("attacker workspace path must be UTF-8")
+        .to_string();
 
     for backend in requested {
         let run = run_backend(backend, &workspace, &readonly, &secret, &outside, &attacker);
@@ -378,7 +384,6 @@ fn run_backend(
     let backend_name = backend.as_str().to_string();
     let sandbox = match Sandbox::builder(workspace)
         .read_only(readonly)
-        .read_only(exe_dir())
         .preferred_backend(match backend {
             BackendKind::AppContainer => BackendPreference::AppContainer,
             BackendKind::WindowsSandboxApi => BackendPreference::WindowsSandboxApi,
@@ -1232,7 +1237,6 @@ fn resource_suite(
 ) {
     // Process-count boundary: 8 under limit succeeds; 1000 hits the limit.
     let process_ok = Sandbox::builder(workspace)
-        .read_only(exe_dir())
         .max_processes(16)
         .timeout(Duration::from_secs(30))
         .build();
@@ -1308,7 +1312,6 @@ fn resource_suite(
 
     // Memory boundary: 64 MB succeeds; 512 MB terminates.
     let memory_ok = Sandbox::builder(workspace)
-        .read_only(exe_dir())
         .max_memory(256 * 1024 * 1024)
         .timeout(Duration::from_secs(30))
         .build();
@@ -1385,7 +1388,6 @@ fn resource_suite(
 
     // Timeout boundary: 1s under 5s succeeds; 60s under 2s times out.
     let timeout_ok = Sandbox::builder(workspace)
-        .read_only(exe_dir())
         .timeout(Duration::from_secs(5))
         .build();
     match timeout_ok {
@@ -1394,7 +1396,6 @@ fn resource_suite(
             match short {
                 Ok(output) if output.status.success() => {
                     let timeout_sandbox = Sandbox::builder(workspace)
-                        .read_only(exe_dir())
                         .timeout(Duration::from_secs(2))
                         .build()
                         .expect("timeout sandbox");
@@ -1539,12 +1540,10 @@ fn concurrency_suite(
     let _ = fs_remove_all(&workspace_b);
     fs::create_dir_all(&workspace_b).unwrap();
     let sandbox_a = Sandbox::builder(workspace_a)
-        .read_only(exe_dir())
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap();
     let sandbox_b = Sandbox::builder(&workspace_b)
-        .read_only(exe_dir())
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap();
@@ -1680,7 +1679,6 @@ fn compatibility_suite(
     )
     .unwrap();
     let cargo_sandbox = match Sandbox::builder(&fixture)
-        .read_only(exe_dir())
         .read_only(
             std::env::var_os("CARGO_HOME")
                 .map(PathBuf::from)
@@ -1923,14 +1921,6 @@ fn fs_remove_all(path: &Path) -> std::io::Result<()> {
 fn p(path: &Path) -> &str {
     path.to_str()
         .expect("path must be valid UTF-8 for eval args")
-}
-
-#[cfg(windows)]
-fn exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(windows)]
