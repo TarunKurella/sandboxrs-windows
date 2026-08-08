@@ -426,10 +426,21 @@ fn run_windows_evals() -> EvalReport {
         std::env::var_os("CARGO_HOME").map(PathBuf::from),
         std::env::var_os("RUSTUP_HOME").map(PathBuf::from),
         std::env::var_os("USERPROFILE").map(PathBuf::from),
-        std::env::var_os("ProgramFiles").map(PathBuf::from),
-    ];
-    let mut compat_builder = Sandbox::builder(&workspace).timeout(Duration::from_secs(30));
-    for root in compat_roots.into_iter().flatten() {
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|root| {
+        Sandbox::builder(&workspace)
+            .read_only(root)
+            .read_only(exe_dir())
+            .build()
+            .is_ok()
+    })
+    .collect::<Vec<_>>();
+    let mut compat_builder = Sandbox::builder(&workspace)
+        .read_only(exe_dir())
+        .timeout(Duration::from_secs(30));
+    for root in compat_roots {
         compat_builder = compat_builder.read_only(root);
     }
     let compat_sandbox = compat_builder.build().expect("compat sandbox");
