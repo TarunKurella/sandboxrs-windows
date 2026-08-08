@@ -157,21 +157,26 @@ Windows VMs and proves every result twice: first that the operation succeeds
 outside the sandbox, then that the sandbox contains it. Reports are uploaded
 as CI artifacts and stored in [`evals/results`](evals/results).
 
-### Measured 2026-08-08
+### Measured 2026-08-08 (Evals V2, standard user)
 
 | Suite | Windows Server 2025 (26100) | Windows 11 ARM64 (26200) |
 |---|---|---|
 | Backend selected | AppContainer | AppContainer |
-| Security contract | 12 / 12 | 12 / 12 |
-| Path escape | 9 / 9 | 9 / 9 |
-| Lifecycle containment | 4 / 4 | 4 / 4 |
-| Environment isolation | 1 / 1 | 1 / 1 |
-| Developer compatibility | 2 / 5 | 3 / 5 |
+| Security evidence PASS | 44 / 44 | 44 / 44 |
+| Security ESCAPE | 0 | 0 |
+| Security ERROR (invalid test) | 0 | 0 |
+| Developer compatibility | 1 / 5 | 2 / 5 |
+| Privilege | standard user | standard user |
 
-Security-relevant suites total **26 / 26** on both runners in the first
-benchmark. This is an experimental benchmark, not a security certification:
-the methodology is under active hardening and the current headline is
-"zero escapes and zero invalid tests," not "100% secure."
+Every security case in Evals V2 records four-state evidence
+(`pass` / `escape` / `error` / `unsupported`), requires a native control proving
+the attack is possible outside the sandbox, restores fixture state after the
+control, and verifies filesystem postconditions. The measured result is
+**44 / 44 pass, 0 escapes, 0 invalid tests** on both runners under a real
+standard Windows user.
+
+This is an experimental benchmark, not a security certification: the headline
+is "zero escapes and zero invalid tests," not "100% secure."
 
 ```mermaid
 pie showData
@@ -243,7 +248,9 @@ The eval covers:
 - inherited handle exfiltration (read through a pre-opened secret handle)
 - Job breakaway, detached, and suspended-resume descendants
 - process-count, memory, and timeout boundary tests
-- `env_clear()` isolation where the child must still launch
+- `env_clear()` isolation where the child must still launch with a correctly
+  rebuilt environment block (including the real `=C:=<current directory>`
+  drive variables for every present logical drive)
 - concurrent sandbox isolation
 - a real malicious Rust fixture built through `cargo`
 
