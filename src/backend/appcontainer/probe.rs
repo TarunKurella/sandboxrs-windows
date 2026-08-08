@@ -41,7 +41,7 @@ pub(crate) fn launch_probe() -> Result<(), String> {
                     cmdline: Some(" /C exit 0".into()),
                     cwd: Some(workspace.clone()),
                     env: Some(rappct::launch::merge_parent_env(Vec::new())),
-                    stdio: StdioConfig::Null,
+                    stdio: StdioConfig::Pipe,
                     suspended: false,
                     join_job: Some(JobLimits {
                         memory_bytes: None,
@@ -64,7 +64,7 @@ pub(crate) fn launch_probe() -> Result<(), String> {
                     cmdline: Some(format!(r#" /C type nul > "{}""#, outside.display())),
                     cwd: Some(workspace.clone()),
                     env: Some(rappct::launch::merge_parent_env(Vec::new())),
-                    stdio: StdioConfig::Null,
+                    stdio: StdioConfig::Pipe,
                     suspended: false,
                     join_job: Some(JobLimits {
                         memory_bytes: None,

@@ -50,10 +50,18 @@ pub(crate) fn spawn(
     let limits = sandbox.limits();
     let timeout = sandbox.timeout();
 
-    let stdio_config = match (stdin, stdout, stderr) {
-        (Stdio::Inherit, Stdio::Inherit, Stdio::Inherit) => StdioConfig::Inherit,
-        (Stdio::Null, Stdio::Null, Stdio::Null) => StdioConfig::Null,
-        _ => StdioConfig::Pipe,
+    // rappct only adds the PROC_THREAD_ATTRIBUTE_HANDLE_LIST for its pipe
+    // path; its NUL path sets inherit_handles without the list, which
+    // CreateProcessW rejects with ERROR_INVALID_PARAMETER when security
+    // capabilities are attached. Route every non-inherit mode through pipes
+    // and keep the parent ends owned by the child.
+    let stdio_config = if matches!(
+        (stdin, stdout, stderr),
+        (Stdio::Inherit, Stdio::Inherit, Stdio::Inherit)
+    ) {
+        StdioConfig::Inherit
+    } else {
+        StdioConfig::Pipe
     };
 
     let launched = launch_in_container_with_io(
