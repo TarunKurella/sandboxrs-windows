@@ -239,7 +239,7 @@ fn main() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(path, json);
+        let _ = std::fs::write(path, &json);
     }
     println!("{json}");
 
