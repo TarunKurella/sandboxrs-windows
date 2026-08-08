@@ -214,42 +214,48 @@ fn component_equal(a: &Component<'_>, b: &Component<'_>) -> bool {
 mod tests {
     use super::*;
 
+    fn abs(path: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!("C:{path}"))
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(path)
+        }
+    }
+
     #[test]
     fn rejects_relative_and_parent_components() {
         assert!(normalize_root(Path::new("relative/path")).is_err());
-        assert!(normalize_root(Path::new("/tmp/../escape")).is_err());
+        assert!(normalize_root(&abs("/tmp/../escape")).is_err());
     }
 
     #[test]
     fn more_specific_rule_wins() {
         let plan = FilesystemPlan::compile(
-            Path::new("/workspace"),
-            &[PathBuf::from("/workspace/.readonly")],
+            &abs("/workspace"),
+            &[abs("/workspace/.readonly")],
             &[],
         )
         .unwrap();
 
-        assert!(plan
-            .access_for(Path::new("/workspace/file.txt"))
-            .is_writable());
+        assert!(plan.access_for(&abs("/workspace/file.txt")).is_writable());
         assert!(!plan
-            .access_for(Path::new("/workspace/.readonly/secret.txt"))
+            .access_for(&abs("/workspace/.readonly/secret.txt"))
             .is_writable());
         assert!(plan
-            .access_for(Path::new("/workspace/.readonly/secret.txt"))
+            .access_for(&abs("/workspace/.readonly/secret.txt"))
             .is_readable());
-        assert_eq!(
-            plan.access_for(Path::new("/outside/file.txt")),
-            Access::Hidden
-        );
+        assert_eq!(plan.access_for(&abs("/outside/file.txt")), Access::Hidden);
     }
 
     #[test]
     fn duplicate_conflicting_rules_fail() {
         let err = FilesystemPlan::compile(
-            Path::new("/workspace"),
-            &[PathBuf::from("/workspace")],
-            &[PathBuf::from("/workspace")],
+            &abs("/workspace"),
+            &[abs("/workspace")],
+            &[abs("/workspace")],
         )
         .unwrap_err();
         assert!(matches!(err, SandboxError::PolicyCompileFailed { .. }));
