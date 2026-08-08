@@ -168,7 +168,10 @@ as CI artifacts and stored in [`evals/results`](evals/results).
 | Environment isolation | 1 / 1 | 1 / 1 |
 | Developer compatibility | 2 / 5 | 3 / 5 |
 
-Security-relevant suites total **26 / 26** on both runners.
+Security-relevant suites total **26 / 26** on both runners in the first
+benchmark. This is an experimental benchmark, not a security certification:
+the methodology is under active hardening and the current headline is
+"zero escapes and zero invalid tests," not "100% secure."
 
 ```mermaid
 pie showData
@@ -209,9 +212,52 @@ Compatibility:
   process initialization on these VMs; this is a compatibility gap, not an
   escape
 
-The workflow is intentionally honest about that distinction: security suites
-are required, while compatibility failures are reported but do not turn the
-workflow red by themselves.
+The workflow is intentionally honest about that distinction: filesystem,
+descendant, reparse, path, handle, Job-containment, resource, and environment
+suites are required and gate CI, while compatibility failures are reported but
+do not turn the workflow red by themselves.
+
+## Evals V2 methodology
+
+Eval results use a four-state outcome model:
+
+```text
+Pass        attack precondition valid, attack executed, OS blocked it
+Escape      forbidden operation succeeded
+Error       test never validly exercised the property
+Unsupported backend/platform genuinely cannot run the test
+```
+
+A process that fails to launch is `Error`, never `Pass`. Every forbidden
+security test has a native control proving the attack is possible outside the
+sandbox, and every descendant test first proves the same capability works
+inside the workspace before asserting it fails in the secret area.
+
+The eval covers:
+
+- filesystem authority with postcondition verification
+- child, grandchild, and great-grandchild authority propagation
+- real directory symlinks, file symlinks, NTFS junctions, and nested junctions
+- dot-dot, absolute, extended-length, case, and relative path representations
+- rename/move and hard-link attacks
+- inherited handle exfiltration (read through a pre-opened secret handle)
+- Job breakaway, detached, and suspended-resume descendants
+- process-count, memory, and timeout boundary tests
+- `env_clear()` isolation where the child must still launch
+- concurrent sandbox isolation
+- a real malicious Rust fixture built through `cargo`
+
+GitHub CI runs the AppContainer suite as a temporary standard user and fails
+if the eval reports `admin: true`, making the no-admin claim testable.
+`--backend windows-sandbox-api` runs the same contract against the modern API
+and reports `unsupported` when the host feature is disabled.
+
+Run locally:
+
+```powershell
+cargo run --bin sandboxrs-eval -- --backend appcontainer --require-standard-user
+cargo run --bin sandboxrs-eval -- --backend windows-sandbox-api --allow-unsupported
+```
 
 ## Security posture
 

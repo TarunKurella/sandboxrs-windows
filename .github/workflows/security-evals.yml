@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  eval:
+  appcontainer-standard-user:
     strategy:
       fail-fast: false
       matrix:
@@ -18,11 +18,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --bin sandboxrs-eval --bin sandboxrs-test-attacker
-      - name: Run sandbox benchmark
-        id: eval
-        run: cargo run --bin sandboxrs-eval -- --report sandboxrs-eval.json
+      - name: Run AppContainer eval as standard user
+        shell: pwsh
+        run: |
+          $password = ConvertTo-SecureString "Sandboxrs!Eval2026" -AsPlainText -Force
+          $user = "sandboxrs-eval"
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $user -Password $password -NoPasswordChange | Out-Null
+          }
+          $cred = New-Object System.Management.Automation.PSCredential($user, $password)
+          $args = @("--backend", "appcontainer", "--require-standard-user", "--report", "sandboxrs-eval.json")
+          $result = Start-Process -FilePath "$PWD\target\debug\sandboxrs-eval.exe" `
+            -ArgumentList $args -Credential $cred -WorkingDirectory $PWD `
+            -Wait -PassThru `
+            -RedirectStandardOutput "eval-out.txt" -RedirectStandardError "eval-err.txt"
+          Get-Content "eval-out.txt" -ErrorAction SilentlyContinue
+          Get-Content "eval-err.txt" -ErrorAction SilentlyContinue
+          if ($result.ExitCode -ne 0) { exit $result.ExitCode }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sandboxrs-eval-${{ matrix.image }}
           path: sandboxrs-eval.json
+
+  modern-api:
+    runs-on: windows-11-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --bin sandboxrs-eval --bin sandboxrs-test-attacker
+      - name: Run modern API eval (expected unsupported on GitHub)
+        run: cargo run --bin sandboxrs-eval -- --backend windows-sandbox-api --allow-unsupported --report modern-sandbox-api.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sandboxrs-eval-modern-api
+          path: modern-sandbox-api.json

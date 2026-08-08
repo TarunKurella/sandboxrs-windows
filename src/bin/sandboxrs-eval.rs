@@ -1,22 +1,178 @@
+use std::fmt;
+#[cfg(windows)]
+use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::process::Command;
 
 #[cfg(windows)]
-use sandboxrs_windows::{Sandbox, SandboxOutput};
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use sandboxrs_windows::{
+    BackendKind, BackendPreference, Sandbox, SandboxError, SandboxOutput, Stdio,
+};
 use serde::Serialize;
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum EvalOutcome {
+    Pass,
+    Escape,
+    Error,
+    Unsupported,
+}
+
+impl fmt::Display for EvalOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pass => f.write_str("pass"),
+            Self::Escape => f.write_str("escape"),
+            Self::Error => f.write_str("error"),
+            Self::Unsupported => f.write_str("unsupported"),
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct Evidence {
+    id: String,
+    name: String,
+    section: String,
+    backend: String,
+    outcome: EvalOutcome,
+    precondition_ok: bool,
+    process_started: bool,
+    operation_attempted: bool,
+    exit_code: Option<i32>,
+    postcondition_ok: bool,
+    detail: String,
+}
+
+impl Evidence {
+    fn pass(
+        id: &str,
+        name: &str,
+        section: &str,
+        backend: &str,
+        exit_code: Option<i32>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            section: section.into(),
+            backend: backend.into(),
+            outcome: EvalOutcome::Pass,
+            precondition_ok: true,
+            process_started: true,
+            operation_attempted: true,
+            exit_code,
+            postcondition_ok: true,
+            detail: detail.into(),
+        }
+    }
+
+    fn escape(
+        id: &str,
+        name: &str,
+        section: &str,
+        backend: &str,
+        exit_code: Option<i32>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            section: section.into(),
+            backend: backend.into(),
+            outcome: EvalOutcome::Escape,
+            precondition_ok: true,
+            process_started: true,
+            operation_attempted: true,
+            exit_code,
+            postcondition_ok: false,
+            detail: detail.into(),
+        }
+    }
+
+    fn error(
+        id: &str,
+        name: &str,
+        section: &str,
+        backend: &str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            section: section.into(),
+            backend: backend.into(),
+            outcome: EvalOutcome::Error,
+            precondition_ok: false,
+            process_started: false,
+            operation_attempted: false,
+            exit_code: None,
+            postcondition_ok: false,
+            detail: detail.into(),
+        }
+    }
+
+    fn unsupported(
+        id: &str,
+        name: &str,
+        section: &str,
+        backend: &str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            section: section.into(),
+            backend: backend.into(),
+            outcome: EvalOutcome::Unsupported,
+            precondition_ok: false,
+            process_started: false,
+            operation_attempted: false,
+            exit_code: None,
+            postcondition_ok: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Serialize, Clone, Default)]
+struct Score {
+    pass: usize,
+    escape: usize,
+    error: usize,
+    unsupported: usize,
+}
+
+impl Score {
+    fn add(&mut self, outcome: EvalOutcome) {
+        match outcome {
+            EvalOutcome::Pass => self.pass += 1,
+            EvalOutcome::Escape => self.escape += 1,
+            EvalOutcome::Error => self.error += 1,
+            EvalOutcome::Unsupported => self.unsupported += 1,
+        }
+    }
+}
 
 #[derive(Serialize, Clone, Default)]
 struct EvalReport {
     os: String,
-    backends: Vec<BackendInfo>,
-    selected: Option<String>,
     admin: bool,
-    security_contract: Vec<Check>,
-    path_escape: Vec<Check>,
-    lifecycle: Vec<Check>,
-    compatibility: Vec<Check>,
-    environment: Vec<Check>,
-    totals: Totals,
+    privilege: String,
+    mode: String,
+    backends: Vec<BackendInfo>,
+    runs: Vec<BackendRun>,
+    security_score: Score,
+    compatibility_score: Score,
+    gate_ok: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -28,61 +184,81 @@ struct BackendInfo {
 }
 
 #[derive(Serialize, Clone)]
-struct Check {
-    name: String,
-    expected: String,
-    actual: String,
-    pass: bool,
-}
-
-#[derive(Serialize, Clone, Default)]
-struct Totals {
-    security_contract: Score,
-    path_escape: Score,
-    lifecycle: Score,
-    compatibility: Score,
-    environment: Score,
-}
-
-#[derive(Serialize, Clone, Default)]
-struct Score {
-    passed: usize,
-    total: usize,
+struct BackendRun {
+    backend: String,
+    selected: Option<String>,
+    security: Vec<Evidence>,
+    compatibility: Vec<Evidence>,
+    security_score: Score,
+    compatibility_score: Score,
 }
 
 fn main() {
-    let report_path = std::env::args()
-        .position(|arg| arg == "--report")
-        .and_then(|index| std::env::args().nth(index + 1));
+    let mut backend_arg = "all".to_string();
+    let mut report_path = None;
+    let mut require_standard_user = false;
+    let mut allow_unsupported = false;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--backend" => {
+                i += 1;
+                backend_arg = args.get(i).cloned().unwrap_or_else(|| "all".into());
+            }
+            "--report" => {
+                i += 1;
+                report_path = args.get(i).cloned();
+            }
+            "--require-standard-user" => require_standard_user = true,
+            "--allow-unsupported" => allow_unsupported = true,
+            other => {
+                eprintln!("unknown option: {other}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
 
     #[cfg(windows)]
-    let report = run_windows_evals();
+    let report = run_windows_evals(&backend_arg, &mut allow_unsupported);
     #[cfg(not(windows))]
     let report = EvalReport {
         os: std::env::consts::OS.to_string(),
+        mode: backend_arg,
         ..Default::default()
     };
 
     let json = serde_json::to_string_pretty(&report).expect("serialize report");
     if let Some(path) = report_path {
-        let _ = std::fs::create_dir_all(PathBuf::from(&path).parent().unwrap_or(Path::new(".")));
-        let _ = std::fs::write(path, &json);
+        let path = PathBuf::from(&path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, json);
     } else {
         println!("{json}");
     }
 
-    let selected = report.selected.as_deref().unwrap_or("");
-    if selected.is_empty()
-        || report.totals.security_contract.passed != report.totals.security_contract.total
-    {
+    if require_standard_user && report.admin {
+        eprintln!("eval ran elevated; standard-user requirement failed");
+        std::process::exit(1);
+    }
+    if !report.gate_ok {
+        eprintln!("security gate failed");
+        std::process::exit(1);
+    }
+    if !allow_unsupported && (report.security_score.error > 0 || report.security_score.escape > 0) {
+        std::process::exit(1);
+    }
+    if report.runs.is_empty() {
         std::process::exit(1);
     }
 }
 
 #[cfg(windows)]
-fn run_windows_evals() -> EvalReport {
+fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalReport {
     use std::fs;
-    use std::time::{Duration, Instant};
 
     let probe = Sandbox::probe();
     let backends: Vec<BackendInfo> = probe
@@ -96,16 +272,28 @@ fn run_windows_evals() -> EvalReport {
         })
         .collect();
 
-    let selected = Sandbox::available_backends().first().copied();
+    let requested = match backend_arg {
+        "auto" => vec![Sandbox::available_backends()
+            .first()
+            .copied()
+            .unwrap_or(BackendKind::AppContainer)],
+        "appcontainer" => vec![BackendKind::AppContainer],
+        "windows-sandbox-api" | "modern" => vec![BackendKind::WindowsSandboxApi],
+        _ => vec![BackendKind::WindowsSandboxApi, BackendKind::AppContainer],
+    };
+
     let mut report = EvalReport {
         os: os_version(),
-        backends,
-        selected: selected.map(|backend| backend.as_str().to_string()),
         admin: running_elevated(),
+        privilege: if running_elevated() {
+            "elevated"
+        } else {
+            "standard"
+        }
+        .into(),
+        mode: backend_arg.into(),
+        backends,
         ..Default::default()
-    };
-    let Some(_backend) = selected else {
-        return report;
     };
 
     let fixture = std::env::temp_dir().join(format!(
@@ -119,12 +307,20 @@ fn run_windows_evals() -> EvalReport {
     let workspace = fixture.join("workspace");
     let readonly = fixture.join("readonly");
     let secret = fixture.join("secret");
-    for dir in [&workspace, &readonly, &secret, &workspace.join("nested")] {
+    let outside = fixture.join("outside");
+    for dir in [
+        &workspace,
+        &readonly,
+        &secret,
+        &outside,
+        &workspace.join("nested"),
+    ] {
         fs::create_dir_all(dir).unwrap();
     }
     fs::write(workspace.join("allowed.txt"), b"allowed").unwrap();
     fs::write(readonly.join("readable.txt"), b"readable").unwrap();
     fs::write(secret.join("DO_NOT_READ.txt"), b"top-secret").unwrap();
+    fs::write(outside.join("outside.txt"), b"outside").unwrap();
 
     let attacker = std::env::current_exe()
         .ok()
@@ -134,316 +330,1263 @@ fn run_windows_evals() -> EvalReport {
         })
         .and_then(|path| path.to_str().map(str::to_owned))
         .expect("attacker helper must be built next to the eval binary");
-    let sandbox = Sandbox::builder(&workspace)
-        .read_only(&readonly)
+
+    for backend in requested {
+        let run = run_backend(backend, &workspace, &readonly, &secret, &outside, &attacker);
+        if run
+            .security
+            .iter()
+            .any(|e| e.outcome == EvalOutcome::Unsupported)
+        {
+            *allow_unsupported = true;
+        }
+        report.runs.push(run);
+    }
+
+    for run in &report.runs {
+        for evidence in &run.security {
+            report.security_score.add(evidence.outcome);
+        }
+        for evidence in &run.compatibility {
+            report.compatibility_score.add(evidence.outcome);
+        }
+    }
+
+    report.gate_ok = report.runs.iter().all(|run| {
+        run.security
+            .iter()
+            .all(|e| matches!(e.outcome, EvalOutcome::Pass | EvalOutcome::Unsupported))
+    });
+    let _ = fs_remove_all(&fixture);
+    report
+}
+
+#[cfg(windows)]
+fn run_backend(
+    backend: BackendKind,
+    workspace: &Path,
+    readonly: &Path,
+    secret: &Path,
+    outside: &Path,
+    attacker: &str,
+) -> BackendRun {
+    let backend_name = backend.as_str().to_string();
+    let sandbox = match Sandbox::builder(workspace)
+        .read_only(readonly)
         .read_only(exe_dir())
-        .timeout(Duration::from_secs(20))
+        .preferred_backend(match backend {
+            BackendKind::AppContainer => BackendPreference::AppContainer,
+            BackendKind::WindowsSandboxApi => BackendPreference::WindowsSandboxApi,
+        })
+        .timeout(Duration::from_secs(30))
         .build()
-        .expect("sandbox should build");
+    {
+        Ok(sandbox) => sandbox,
+        Err(err) => {
+            let unsupported = Evidence::unsupported(
+                "backend.unavailable",
+                "backend unavailable",
+                "backend",
+                &backend_name,
+                err.to_string(),
+            );
+            return BackendRun {
+                backend: backend_name,
+                selected: None,
+                security: vec![unsupported],
+                compatibility: Vec::new(),
+                security_score: Score {
+                    unsupported: 1,
+                    ..Default::default()
+                },
+                compatibility_score: Score::default(),
+            };
+        }
+    };
 
-    // Control: the same forbidden operations must succeed outside the sandbox.
-    let control_write = native_succeeds(
-        Command::new(&attacker)
-            .arg("write")
-            .arg(secret.join("control-pwned.txt")),
-    );
-    let control_read = native_succeeds(
-        Command::new(&attacker)
-            .arg("read")
-            .arg(secret.join("DO_NOT_READ.txt")),
-    );
-    report.security_contract.push(Check {
-        name: "control: native outside write succeeds".into(),
-        expected: "true".into(),
-        actual: control_write.to_string(),
-        pass: control_write,
-    });
-    report.security_contract.push(Check {
-        name: "control: native secret read succeeds".into(),
-        expected: "true".into(),
-        actual: control_read.to_string(),
-        pass: control_read,
-    });
+    let mut security = Vec::new();
+    let mut compatibility = Vec::new();
 
-    let mut contract = Vec::new();
-    contract.push(expect_run(
+    filesystem_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        readonly,
+        secret,
+        outside,
+        &backend_name,
+    );
+    descendant_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        secret,
+        &backend_name,
+    );
+    reparse_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        outside,
+        secret,
+        &backend_name,
+    );
+    path_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        secret,
+        &backend_name,
+    );
+    rename_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        outside,
+        &backend_name,
+    );
+    hardlink_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        secret,
+        &backend_name,
+    );
+    handle_suite(&mut security, &sandbox, attacker, secret, &backend_name);
+    job_breakaway_suite(&mut security, &sandbox, attacker, workspace, &backend_name);
+    resource_suite(&mut security, &sandbox, attacker, workspace, &backend_name);
+    environment_suite(&mut security, &sandbox, attacker, workspace, &backend_name);
+    concurrency_suite(&mut security, attacker, workspace, secret, &backend_name);
+
+    compatibility_suite(
+        &mut compatibility,
+        &sandbox,
+        attacker,
+        workspace,
+        &backend_name,
+    );
+
+    let mut security_score = Score::default();
+    for evidence in &security {
+        security_score.add(evidence.outcome);
+    }
+    let mut compatibility_score = Score::default();
+    for evidence in &compatibility {
+        compatibility_score.add(evidence.outcome);
+    }
+
+    BackendRun {
+        backend: backend_name.clone(),
+        selected: Some(sandbox.backend().as_str().to_string()),
+        security,
+        compatibility,
+        security_score,
+        compatibility_score,
+    }
+}
+
+#[cfg(windows)]
+fn filesystem_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    readonly: &Path,
+    secret: &Path,
+    outside: &Path,
+    backend: &str,
+) {
+    let ws = workspace.join("allowed.txt");
+    let ws_write = workspace.join("workspace-write.txt");
+    let ws_delete = workspace.join("workspace-delete.txt");
+    let ro_read = readonly.join("readable.txt");
+    let ro_write = readonly.join("readable-new.txt");
+    let ro_delete = readonly.join("readable.txt");
+    let secret_read = secret.join("DO_NOT_READ.txt");
+    let secret_write = secret.join("pwned.txt");
+    let secret_delete = secret.join("DO_NOT_READ.txt");
+    let secret_rename = secret.join("renamed.txt");
+    let outside_read = outside.join("outside.txt");
+    let outside_write = outside.join("pwned.txt");
+    let outside_delete = outside.join("outside.txt");
+    let outside_rename = outside.join("renamed.txt");
+
+    allowed_case(
+        security,
+        "fs.workspace.read",
         "read workspace",
-        true,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["read", workspace.join("allowed.txt").to_str().unwrap()],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
+        sandbox,
+        attacker,
+        &["read", p(&ws)],
+        workspace,
+        backend,
+        || true,
+    );
+    allowed_case(
+        security,
+        "fs.workspace.write",
         "write workspace",
-        true,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &[
-                "write",
-                workspace.join("workspace-write.txt").to_str().unwrap(),
-            ],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
+        sandbox,
+        attacker,
+        &["write", p(&ws_write)],
+        workspace,
+        backend,
+        || ws_write.exists(),
+    );
+    let delete_target = ws_delete.clone();
+    fs::write(&ws_delete, b"x").unwrap();
+    allowed_case(
+        security,
+        "fs.workspace.delete",
         "delete workspace",
-        true,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &[
-                "delete",
-                workspace.join("workspace-write.txt").to_str().unwrap(),
-            ],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
+        sandbox,
+        attacker,
+        &["delete", p(&ws_delete)],
+        workspace,
+        backend,
+        || !delete_target.exists(),
+    );
+    allowed_case(
+        security,
+        "fs.readonly.read",
         "read readonly",
-        true,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["read", readonly.join("readable.txt").to_str().unwrap()],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
-        "write readonly",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["write", readonly.join("readable-new.txt").to_str().unwrap()],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
-        "delete readonly",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["delete", readonly.join("readable.txt").to_str().unwrap()],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
-        "read secret",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["read", secret.join("DO_NOT_READ.txt").to_str().unwrap()],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
-        "write secret",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["write", secret.join("pwned.txt").to_str().unwrap()],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
-        "child write secret",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &[
-                "spawn-write",
-                secret.join("child-pwned.txt").to_str().unwrap(),
-            ],
-            &workspace,
-        ),
-    ));
-    contract.push(expect_run(
-        "grandchild write secret",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &[
-                "grandchild-write",
-                secret.join("grandchild-pwned.txt").to_str().unwrap(),
-            ],
-            &workspace,
-        ),
-    ));
-    report.security_contract.extend(contract);
+        sandbox,
+        attacker,
+        &["read", p(&ro_read)],
+        workspace,
+        backend,
+        || true,
+    );
 
-    // Path attacks.
+    forbidden_case(
+        security,
+        "fs.readonly.write",
+        "write readonly",
+        sandbox,
+        attacker,
+        &["write", p(&ro_write)],
+        workspace,
+        backend,
+        || !ro_write.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.readonly.delete",
+        "delete readonly",
+        sandbox,
+        attacker,
+        &["delete", p(&ro_delete)],
+        workspace,
+        backend,
+        || ro_delete.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.secret.read",
+        "read secret",
+        sandbox,
+        attacker,
+        &["read", p(&secret_read)],
+        workspace,
+        backend,
+        || true,
+    );
+    forbidden_case(
+        security,
+        "fs.secret.write",
+        "write secret",
+        sandbox,
+        attacker,
+        &["write", p(&secret_write)],
+        workspace,
+        backend,
+        || !secret_write.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.secret.delete",
+        "delete secret",
+        sandbox,
+        attacker,
+        &["delete", p(&secret_delete)],
+        workspace,
+        backend,
+        || secret_delete.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.secret.rename",
+        "rename secret",
+        sandbox,
+        attacker,
+        &["move", p(&secret_read), p(&secret_rename)],
+        workspace,
+        backend,
+        || secret_read.exists() && !secret_rename.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.outside.read",
+        "read outside",
+        sandbox,
+        attacker,
+        &["read", p(&outside_read)],
+        workspace,
+        backend,
+        || true,
+    );
+    forbidden_case(
+        security,
+        "fs.outside.write",
+        "write outside",
+        sandbox,
+        attacker,
+        &["write", p(&outside_write)],
+        workspace,
+        backend,
+        || !outside_write.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.outside.delete",
+        "delete outside",
+        sandbox,
+        attacker,
+        &["delete", p(&outside_delete)],
+        workspace,
+        backend,
+        || outside_delete.exists(),
+    );
+    forbidden_case(
+        security,
+        "fs.outside.rename",
+        "rename outside",
+        sandbox,
+        attacker,
+        &["move", p(&outside_read), p(&outside_rename)],
+        workspace,
+        backend,
+        || outside_read.exists() && !outside_rename.exists(),
+    );
+}
+
+#[cfg(windows)]
+fn descendant_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    secret: &Path,
+    backend: &str,
+) {
+    let ws_child = workspace.join("child-workspace.txt");
+    let ws_grand = workspace.join("grandchild-workspace.txt");
+    let ws_great = workspace.join("great-grandchild-workspace.txt");
+    let secret_child = secret.join("child-pwned.txt");
+    let secret_grand = secret.join("grandchild-pwned.txt");
+    let secret_great = secret.join("great-grandchild-pwned.txt");
+
+    allowed_case(
+        security,
+        "desc.child.write.workspace",
+        "child write workspace",
+        sandbox,
+        attacker,
+        &["spawn-write", p(&ws_child)],
+        workspace,
+        backend,
+        || ws_child.exists(),
+    );
+    allowed_case(
+        security,
+        "desc.grandchild.write.workspace",
+        "grandchild write workspace",
+        sandbox,
+        attacker,
+        &["grandchild-write", p(&ws_grand)],
+        workspace,
+        backend,
+        || ws_grand.exists(),
+    );
+    allowed_case(
+        security,
+        "desc.great-grandchild.write.workspace",
+        "great-grandchild write workspace",
+        sandbox,
+        attacker,
+        &["great-grandchild-write", p(&ws_great)],
+        workspace,
+        backend,
+        || ws_great.exists(),
+    );
+    forbidden_case(
+        security,
+        "desc.child.write.secret",
+        "child write secret",
+        sandbox,
+        attacker,
+        &["spawn-write", p(&secret_child)],
+        workspace,
+        backend,
+        || !secret_child.exists(),
+    );
+    forbidden_case(
+        security,
+        "desc.grandchild.write.secret",
+        "grandchild write secret",
+        sandbox,
+        attacker,
+        &["grandchild-write", p(&secret_grand)],
+        workspace,
+        backend,
+        || !secret_grand.exists(),
+    );
+    forbidden_case(
+        security,
+        "desc.great-grandchild.write.secret",
+        "great-grandchild write secret",
+        sandbox,
+        attacker,
+        &["great-grandchild-write", p(&secret_great)],
+        workspace,
+        backend,
+        || !secret_great.exists(),
+    );
+}
+
+#[cfg(windows)]
+fn reparse_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    outside: &Path,
+    secret: &Path,
+    backend: &str,
+) {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
+    let dir_link = workspace.join("dir-symlink");
+    let file_link = workspace.join("file-symlink.txt");
+    let junction = workspace.join("junction");
+    let nested_junction = workspace.join("nested").join("escape");
+
+    let _ = fs_remove_all(&dir_link);
+    let _ = fs::remove_file(&file_link);
+    let _ = fs_remove_all(&junction);
+    let _ = fs_remove_all(&nested_junction);
+
+    let dir_created = symlink_dir(outside, &dir_link).is_ok() && dir_link.exists();
+    let file_created =
+        symlink_file(secret.join("DO_NOT_READ.txt"), &file_link).is_ok() && file_link.exists();
+    let junction_created = create_junction(&junction, outside);
+    let nested_created = create_junction(&nested_junction, secret);
+
+    reparse_case(
+        security,
+        "reparse.dir-symlink.write",
+        "directory symlink write",
+        sandbox,
+        attacker,
+        workspace,
+        &dir_link,
+        backend,
+        dir_created,
+    );
+    reparse_case(
+        security,
+        "reparse.file-symlink.read",
+        "file symlink read",
+        sandbox,
+        attacker,
+        workspace,
+        &file_link,
+        backend,
+        file_created,
+    );
+    reparse_case(
+        security,
+        "reparse.junction.write",
+        "NTFS junction write",
+        sandbox,
+        attacker,
+        workspace,
+        &junction,
+        backend,
+        junction_created,
+    );
+    reparse_case(
+        security,
+        "reparse.nested-junction.write",
+        "nested junction write",
+        sandbox,
+        attacker,
+        workspace,
+        &nested_junction,
+        backend,
+        nested_created,
+    );
+}
+
+#[cfg(windows)]
+fn reparse_case(
+    security: &mut Vec<Evidence>,
+    id: &str,
+    name: &str,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    link: &Path,
+    backend: &str,
+    created: bool,
+) {
+    if !created {
+        security.push(Evidence::error(
+            id,
+            name,
+            "reparse",
+            backend,
+            "link fixture could not be created",
+        ));
+        return;
+    }
+    let target = link.join("pwned.txt");
+    if native_succeeds(Command::new(attacker).arg("write").arg(p(&target))) {
+        let output = sandbox_output(sandbox, attacker, &["write", p(&target)], workspace);
+        match output {
+            Ok(output) if !output.status.success() && !target.exists() => {
+                security.push(Evidence::pass(
+                    id,
+                    name,
+                    "reparse",
+                    backend,
+                    output.status.code(),
+                    format!(
+                        "OS blocked write through reparse point, stderr={:?}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ),
+                ));
+            }
+            Ok(output) if output.status.success() => {
+                security.push(Evidence::escape(
+                    id,
+                    name,
+                    "reparse",
+                    backend,
+                    output.status.code(),
+                    "write through reparse point succeeded",
+                ));
+            }
+            Ok(output) => {
+                security.push(Evidence::error(
+                    id,
+                    name,
+                    "reparse",
+                    backend,
+                    format!("write denied but postcondition invalid: {}", output.status),
+                ));
+            }
+            Err(err) => {
+                security.push(Evidence::error(
+                    id,
+                    name,
+                    "reparse",
+                    backend,
+                    format!("sandbox process did not start: {err}"),
+                ));
+            }
+        }
+    } else {
+        security.push(Evidence::error(
+            id,
+            name,
+            "reparse",
+            backend,
+            "native write through reparse point failed; fixture is not a real escape vector",
+        ));
+    }
+}
+
+#[cfg(windows)]
+fn path_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    secret: &Path,
+    backend: &str,
+) {
+    let target = secret.join("path-pwned.txt");
     let attacks: Vec<(&str, PathBuf)> = vec![
-        ("dotdot relative", PathBuf::from(r"..\secret\pwned.txt")),
-        ("workspace dotdot", workspace.join(r"..\secret\pwned.txt")),
-        ("absolute path", secret.join("pwned.txt")),
-        ("case variation", secret.join("PWNED.TXT")),
+        (
+            "dotdot relative",
+            PathBuf::from(r"..\secret\path-pwned.txt"),
+        ),
+        (
+            "workspace dotdot",
+            workspace.join(r"..\secret\path-pwned.txt"),
+        ),
+        ("absolute path", target.clone()),
+        ("case variation", secret.join("PATH-PWNED.TXT")),
         (
             "extended path",
-            PathBuf::from(format!(r"\\?\{}", secret.join("pwned.txt").display())),
+            PathBuf::from(format!(r"\\?\{}", target.display())),
         ),
-        ("relative path", PathBuf::from(r".\..\secret\pwned.txt")),
+        (
+            "relative path",
+            PathBuf::from(r".\..\secret\path-pwned.txt"),
+        ),
     ];
     for (name, path) in attacks {
-        let output = run_cwd(
-            &sandbox,
-            &attacker,
-            &["write", path.to_str().unwrap()],
-            &workspace,
+        forbidden_case(
+            security,
+            &format!("path.{name}"),
+            name,
+            sandbox,
+            attacker,
+            &["write", p(&path)],
+            workspace,
+            backend,
+            || !target.exists(),
         );
-        report.path_escape.push(expect_run(name, false, output));
     }
+}
 
-    let junction = workspace.join("innocent");
-    let symlink = workspace.join("symlink-file.txt");
-    let _ = fs::remove_dir_all(&junction);
-    let _ = fs::remove_file(&symlink);
-    let _ = std::os::windows::fs::symlink_dir(&secret, &junction);
-    let _ = std::os::windows::fs::symlink_file(secret.join("DO_NOT_READ.txt"), &symlink);
-    report.path_escape.push(expect_run(
-        "junction write",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["write", junction.join("pwned.txt").to_str().unwrap()],
-            &workspace,
+#[cfg(windows)]
+fn rename_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    outside: &Path,
+    backend: &str,
+) {
+    let inside = workspace.join("move-target.txt");
+    let outside_target = outside.join("move-pwned.txt");
+    let _ = fs::remove_file(&inside);
+    fs::write(&inside, b"x").unwrap();
+    forbidden_case(
+        security,
+        "rename.inside-to-outside",
+        "move inside to outside",
+        sandbox,
+        attacker,
+        &["move", p(&inside), p(&outside_target)],
+        workspace,
+        backend,
+        || inside.exists() && !outside_target.exists(),
+    );
+}
+
+#[cfg(windows)]
+fn hardlink_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    secret: &Path,
+    backend: &str,
+) {
+    let outside_secret = secret.join("DO_NOT_READ.txt");
+    let link = workspace.join("hardlink-leak.txt");
+    let _ = fs::remove_file(&link);
+    forbidden_case(
+        security,
+        "hardlink.outside-to-workspace",
+        "hard link outside secret",
+        sandbox,
+        attacker,
+        &["link", p(&outside_secret), p(&link)],
+        workspace,
+        backend,
+        || !link.exists(),
+    );
+}
+
+#[cfg(windows)]
+fn handle_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    secret: &Path,
+    backend: &str,
+) {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .open(secret.join("DO_NOT_READ.txt"))
+    {
+        Ok(file) => file,
+        Err(err) => {
+            security.push(Evidence::error(
+                "handles.open",
+                "open secret file",
+                "handles",
+                backend,
+                err.to_string(),
+            ));
+            return;
+        }
+    };
+    let raw = file.as_raw_handle();
+    // SAFETY: `raw` is a live handle owned by `file`; the flag only changes
+    // inheritance.
+    let ok = unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+    if ok == 0 {
+        security.push(Evidence::error(
+            "handles.inheritable",
+            "mark handle inheritable",
+            "handles",
+            backend,
+            "SetHandleInformation failed",
+        ));
+        return;
+    }
+    let value = format!("{:x}", raw as usize);
+    if native_succeeds(Command::new(attacker).arg("read-handle").arg(&value)) {
+        let output = sandbox_output(sandbox, attacker, &["read-handle", value.as_str()], secret);
+        match output {
+            Ok(output) if !output.status.success() => {
+                security.push(Evidence::pass(
+                    "handles.secret",
+                    "inherited secret handle blocked",
+                    "handles",
+                    backend,
+                    output.status.code(),
+                    "sandbox did not inherit parent handle",
+                ));
+            }
+            Ok(output) => {
+                security.push(Evidence::escape(
+                    "handles.secret",
+                    "inherited secret handle blocked",
+                    "handles",
+                    backend,
+                    output.status.code(),
+                    "sandbox read through inherited handle",
+                ));
+            }
+            Err(err) => {
+                security.push(Evidence::error(
+                    "handles.secret",
+                    "inherited secret handle blocked",
+                    "handles",
+                    backend,
+                    format!("process did not start: {err}"),
+                ));
+            }
+        }
+    } else {
+        security.push(Evidence::error(
+            "handles.secret",
+            "inherited secret handle blocked",
+            "handles",
+            backend,
+            "native child could not read the inheritable handle; control failed",
+        ));
+    }
+}
+
+#[cfg(windows)]
+fn job_breakaway_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    backend: &str,
+) {
+    for (mode, id, name) in [
+        (
+            "detached",
+            "job.detached",
+            "detached child cannot outlive sandbox",
         ),
-    ));
-    report.path_escape.push(expect_run(
-        "symlink read",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["read", symlink.to_str().unwrap()],
-            &workspace,
+        (
+            "breakaway",
+            "job.breakaway",
+            "breakaway child cannot outlive sandbox",
         ),
-    ));
-    let nested_junction = workspace.join("nested").join("escape");
-    let _ = std::os::windows::fs::symlink_dir(&secret, &nested_junction);
-    report.path_escape.push(expect_run(
-        "nested junction write",
-        false,
-        run_cwd(
-            &sandbox,
-            &attacker,
-            &["write", nested_junction.join("pwned.txt").to_str().unwrap()],
-            &workspace,
+        (
+            "suspended",
+            "job.suspended",
+            "suspended-resume child cannot outlive sandbox",
         ),
-    ));
+    ] {
+        let pidfile = workspace.join(format!("breakaway-{mode}.pid"));
+        let _ = fs::remove_file(&pidfile);
+        let mut parent = match sandbox
+            .command(attacker)
+            .arg("spawn-breakaway")
+            .arg(mode)
+            .arg(p(&pidfile))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(parent) => parent,
+            Err(err) => {
+                security.push(Evidence::error(
+                    id,
+                    name,
+                    "job",
+                    backend,
+                    format!("process did not start: {err}"),
+                ));
+                continue;
+            }
+        };
+        let status = parent.wait().ok();
+        let child_pid: u32 = fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        if child_pid == 0 {
+            if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+                security.push(Evidence::error(
+                    id,
+                    name,
+                    "job",
+                    backend,
+                    "child PID was not produced; test never exercised breakaway",
+                ));
+            } else {
+                security.push(Evidence::pass(
+                    id,
+                    name,
+                    "job",
+                    backend,
+                    status.and_then(|s| s.code()),
+                    "breakaway creation was denied",
+                ));
+            }
+            continue;
+        }
+        if !process_exists(child_pid) {
+            security.push(Evidence::error(
+                id,
+                name,
+                "job",
+                backend,
+                format!("child {child_pid} was not alive before kill"),
+            ));
+            continue;
+        }
+        drop(parent);
+        std::thread::sleep(Duration::from_millis(300));
+        if process_exists(child_pid) {
+            security.push(Evidence::escape(
+                id,
+                name,
+                "job",
+                backend,
+                None,
+                format!("child {child_pid} outlived sandbox teardown"),
+            ));
+        } else {
+            security.push(Evidence::pass(
+                id,
+                name,
+                "job",
+                backend,
+                Some(0),
+                format!("child {child_pid} died with sandbox"),
+            ));
+        }
+    }
+}
 
-    // Lifecycle containment.
-    let pidfile = fixture.join("orphan.pid");
-    let mut orphan = sandbox
-        .command(&attacker)
-        .arg("spawn-child-sleep")
-        .arg(&pidfile)
-        .stdout(sandboxrs_windows::Stdio::null())
-        .stderr(sandboxrs_windows::Stdio::null())
-        .spawn()
-        .expect("spawn orphan helper");
-    std::thread::sleep(Duration::from_millis(800));
-    let child_pid: u32 = fs::read_to_string(&pidfile)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0);
-    orphan.kill().expect("kill sandbox");
-    let _ = orphan.wait();
-    let orphan_gone = child_pid == 0 || !process_exists(child_pid);
-    report.lifecycle.push(Check {
-        name: "kill terminates descendant".into(),
-        expected: "true".into(),
-        actual: orphan_gone.to_string(),
-        pass: orphan_gone,
-    });
-
-    let timeout_sandbox = Sandbox::builder(&workspace)
-        .read_only(exe_dir())
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("timeout sandbox");
-    let start = Instant::now();
-    let timeout_out = run_cwd(&timeout_sandbox, &attacker, &["sleep", "120"], &workspace);
-    let timed_out = !timeout_out.0.success() && start.elapsed() < Duration::from_secs(10);
-    report.lifecycle.push(Check {
-        name: "timeout terminates process".into(),
-        expected: "true".into(),
-        actual: format!("status={} elapsed={:?}", timeout_out.0, start.elapsed()),
-        pass: timed_out,
-    });
-
-    let bomb_sandbox = Sandbox::builder(&workspace)
+#[cfg(windows)]
+fn resource_suite(
+    security: &mut Vec<Evidence>,
+    _sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    backend: &str,
+) {
+    // Process-count boundary: 8 under limit succeeds; 1000 hits the limit.
+    let process_ok = Sandbox::builder(workspace)
         .read_only(exe_dir())
         .max_processes(16)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .expect("bomb sandbox");
-    let bomb = run_cwd(
-        &bomb_sandbox,
-        &attacker,
-        &["spawn-many", "1000"],
-        &workspace,
-    );
-    let bomb_contained = !bomb.0.success();
-    report.lifecycle.push(Check {
-        name: "process limit contains bomb".into(),
-        expected: "true".into(),
-        actual: format!("status={}", bomb.0),
-        pass: bomb_contained,
-    });
+        .timeout(Duration::from_secs(30))
+        .build();
+    match process_ok {
+        Ok(sandbox) => {
+            let output8 = sandbox_output(&sandbox, attacker, &["spawn-many", "8"], workspace);
+            match output8 {
+                Ok(output) if output.status.success() => {
+                    let output1000 =
+                        sandbox_output(&sandbox, attacker, &["spawn-many", "1000"], workspace);
+                    match output1000 {
+                        Ok(output) if !output.status.success() => {
+                            security.push(Evidence::pass(
+                                "resource.process-boundary",
+                                "process boundary",
+                                "resources",
+                                backend,
+                                output.status.code(),
+                                "8 succeeded, 1000 contained",
+                            ));
+                        }
+                        Ok(output) => {
+                            security.push(Evidence::escape(
+                                "resource.process-boundary",
+                                "process boundary",
+                                "resources",
+                                backend,
+                                output.status.code(),
+                                "1000-process bomb succeeded",
+                            ));
+                        }
+                        Err(err) => {
+                            security.push(Evidence::error(
+                                "resource.process-boundary",
+                                "process boundary",
+                                "resources",
+                                backend,
+                                format!("bomb process did not start: {err}"),
+                            ));
+                        }
+                    }
+                }
+                Ok(output) => {
+                    security.push(Evidence::error(
+                        "resource.process-boundary",
+                        "process boundary",
+                        "resources",
+                        backend,
+                        format!("8 processes did not succeed: {}", output.status),
+                    ));
+                }
+                Err(err) => {
+                    security.push(Evidence::error(
+                        "resource.process-boundary",
+                        "process boundary",
+                        "resources",
+                        backend,
+                        format!("process did not start: {err}"),
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            security.push(Evidence::error(
+                "resource.process-boundary",
+                "process boundary",
+                "resources",
+                backend,
+                format!("sandbox did not build: {err}"),
+            ));
+        }
+    }
 
-    let memory_sandbox = Sandbox::builder(&workspace)
+    // Memory boundary: 64 MB succeeds; 512 MB terminates.
+    let memory_ok = Sandbox::builder(workspace)
         .read_only(exe_dir())
         .max_memory(256 * 1024 * 1024)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .expect("memory sandbox");
-    let memory = run_cwd(
-        &memory_sandbox,
-        &attacker,
-        &["allocate-memory", "2048"],
-        &workspace,
-    );
-    let memory_contained = !memory.0.success();
-    report.lifecycle.push(Check {
-        name: "memory limit terminates allocation".into(),
-        expected: "true".into(),
-        actual: format!("status={}", memory.0),
-        pass: memory_contained,
-    });
-
-    // Developer compatibility.
-    let compat_roots = [
-        std::env::var_os("CARGO_HOME").map(PathBuf::from),
-        std::env::var_os("RUSTUP_HOME").map(PathBuf::from),
-        std::env::var_os("USERPROFILE").map(PathBuf::from),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|root| {
-        Sandbox::builder(&workspace)
-            .read_only(root)
-            .read_only(exe_dir())
-            .build()
-            .is_ok()
-    })
-    .collect::<Vec<_>>();
-    let mut compat_builder = Sandbox::builder(&workspace)
-        .read_only(exe_dir())
-        .timeout(Duration::from_secs(30));
-    for root in compat_roots {
-        compat_builder = compat_builder.read_only(root);
+        .timeout(Duration::from_secs(30))
+        .build();
+    match memory_ok {
+        Ok(sandbox) => {
+            let output64 =
+                sandbox_output(&sandbox, attacker, &["allocate-memory", "64"], workspace);
+            match output64 {
+                Ok(output) if output.status.success() => {
+                    let output512 =
+                        sandbox_output(&sandbox, attacker, &["allocate-memory", "512"], workspace);
+                    match output512 {
+                        Ok(output) if !output.status.success() => {
+                            security.push(Evidence::pass(
+                                "resource.memory-boundary",
+                                "memory boundary",
+                                "resources",
+                                backend,
+                                output.status.code(),
+                                "64 MB succeeded, 512 MB terminated",
+                            ));
+                        }
+                        Ok(output) => {
+                            security.push(Evidence::escape(
+                                "resource.memory-boundary",
+                                "memory boundary",
+                                "resources",
+                                backend,
+                                output.status.code(),
+                                "512 MB allocation succeeded",
+                            ));
+                        }
+                        Err(err) => {
+                            security.push(Evidence::error(
+                                "resource.memory-boundary",
+                                "memory boundary",
+                                "resources",
+                                backend,
+                                format!("allocation process did not start: {err}"),
+                            ));
+                        }
+                    }
+                }
+                Ok(output) => {
+                    security.push(Evidence::error(
+                        "resource.memory-boundary",
+                        "memory boundary",
+                        "resources",
+                        backend,
+                        format!("64 MB allocation did not succeed: {}", output.status),
+                    ));
+                }
+                Err(err) => {
+                    security.push(Evidence::error(
+                        "resource.memory-boundary",
+                        "memory boundary",
+                        "resources",
+                        backend,
+                        format!("process did not start: {err}"),
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            security.push(Evidence::error(
+                "resource.memory-boundary",
+                "memory boundary",
+                "resources",
+                backend,
+                format!("sandbox did not build: {err}"),
+            ));
+        }
     }
-    let compat_sandbox = compat_builder.build().expect("compat sandbox");
+
+    // Timeout boundary: 1s under 5s succeeds; 60s under 2s times out.
+    let timeout_ok = Sandbox::builder(workspace)
+        .read_only(exe_dir())
+        .timeout(Duration::from_secs(5))
+        .build();
+    match timeout_ok {
+        Ok(sandbox) => {
+            let short = sandbox_output(&sandbox, attacker, &["sleep", "1"], workspace);
+            match short {
+                Ok(output) if output.status.success() => {
+                    let timeout_sandbox = Sandbox::builder(workspace)
+                        .read_only(exe_dir())
+                        .timeout(Duration::from_secs(2))
+                        .build()
+                        .expect("timeout sandbox");
+                    let start = Instant::now();
+                    let long =
+                        sandbox_output(&timeout_sandbox, attacker, &["sleep", "60"], workspace);
+                    match long {
+                        Ok(output)
+                            if !output.status.success()
+                                && start.elapsed() < Duration::from_secs(15) =>
+                        {
+                            security.push(Evidence::pass(
+                                "resource.timeout-boundary",
+                                "timeout boundary",
+                                "resources",
+                                backend,
+                                output.status.code(),
+                                format!("short succeeded; long timed out in {:?}", start.elapsed()),
+                            ));
+                        }
+                        Ok(output) => {
+                            security.push(Evidence::escape(
+                                "resource.timeout-boundary",
+                                "timeout boundary",
+                                "resources",
+                                backend,
+                                output.status.code(),
+                                "long sleep was not terminated",
+                            ));
+                        }
+                        Err(err) => {
+                            security.push(Evidence::error(
+                                "resource.timeout-boundary",
+                                "timeout boundary",
+                                "resources",
+                                backend,
+                                format!("long process did not start: {err}"),
+                            ));
+                        }
+                    }
+                }
+                Ok(output) => {
+                    security.push(Evidence::error(
+                        "resource.timeout-boundary",
+                        "timeout boundary",
+                        "resources",
+                        backend,
+                        format!("1s sleep did not succeed: {}", output.status),
+                    ));
+                }
+                Err(err) => {
+                    security.push(Evidence::error(
+                        "resource.timeout-boundary",
+                        "timeout boundary",
+                        "resources",
+                        backend,
+                        format!("process did not start: {err}"),
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            security.push(Evidence::error(
+                "resource.timeout-boundary",
+                "timeout boundary",
+                "resources",
+                backend,
+                format!("sandbox did not build: {err}"),
+            ));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn environment_suite(
+    security: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    backend: &str,
+) {
+    std::env::set_var("SANDBOXRS_TEST_SECRET", "super-secret-value");
+    let mut command = sandbox.command(attacker);
+    command
+        .env_clear()
+        .args(["env", "SANDBOXRS_TEST_SECRET"])
+        .current_dir(workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match command.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            if stdout.contains("super-secret-value") {
+                security.push(Evidence::escape(
+                    "env.clear-secret",
+                    "env_clear removes secret",
+                    "environment",
+                    backend,
+                    output.status.code(),
+                    "secret leaked through env_clear",
+                ));
+            } else {
+                security.push(Evidence::pass(
+                    "env.clear-secret",
+                    "env_clear removes secret",
+                    "environment",
+                    backend,
+                    output.status.code(),
+                    format!("secret absent; stderr={stderr:?}"),
+                ));
+            }
+        }
+        Err(err) => {
+            security.push(Evidence::error(
+                "env.clear-secret",
+                "env_clear removes secret",
+                "environment",
+                backend,
+                format!("process did not start: {err}"),
+            ));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn concurrency_suite(
+    security: &mut Vec<Evidence>,
+    attacker: &str,
+    workspace_a: &Path,
+    secret: &Path,
+    backend: &str,
+) {
+    let workspace_b = std::env::temp_dir().join(format!(
+        "sandboxrs-eval-b-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = fs_remove_all(&workspace_b);
+    fs::create_dir_all(&workspace_b).unwrap();
+    let sandbox_a = Sandbox::builder(workspace_a)
+        .read_only(exe_dir())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let sandbox_b = Sandbox::builder(&workspace_b)
+        .read_only(exe_dir())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+
+    let a_write = workspace_a.join("concurrent-a.txt");
+    let b_write = workspace_b.join("concurrent-b.txt");
+    allowed_case(
+        security,
+        "concurrent.a-write-a",
+        "sandbox A writes A",
+        &sandbox_a,
+        attacker,
+        &["write", p(&a_write)],
+        workspace_a,
+        backend,
+        || a_write.exists(),
+    );
+    forbidden_case(
+        security,
+        "concurrent.a-write-b",
+        "sandbox A writes B",
+        &sandbox_a,
+        attacker,
+        &["write", p(&b_write)],
+        workspace_a,
+        backend,
+        || !b_write.exists(),
+    );
+    allowed_case(
+        security,
+        "concurrent.b-write-b",
+        "sandbox B writes B",
+        &sandbox_b,
+        attacker,
+        &["write", p(&b_write)],
+        &workspace_b,
+        backend,
+        || b_write.exists(),
+    );
+    forbidden_case(
+        security,
+        "concurrent.b-write-a",
+        "sandbox B writes A",
+        &sandbox_b,
+        attacker,
+        &["write", p(&a_write)],
+        &workspace_b,
+        backend,
+        || !a_write.exists(),
+    );
+    let _ = secret;
+    let _ = fs_remove_all(&workspace_b);
+}
+
+#[cfg(windows)]
+fn compatibility_suite(
+    compatibility: &mut Vec<Evidence>,
+    sandbox: &Sandbox,
+    attacker: &str,
+    workspace: &Path,
+    backend: &str,
+) {
     for (name, program, args) in [
         ("cmd", "cmd", vec!["/c", "echo", "hello"]),
         ("git", "git", vec!["--version"]),
@@ -454,98 +1597,260 @@ fn run_windows_evals() -> EvalReport {
         if !native_succeeds(Command::new(program).arg(args[0])) {
             continue;
         }
-        let output = run_cwd(&compat_sandbox, program, &args, &workspace);
-        report.compatibility.push(expect_run(name, true, output));
+        let output = sandbox_output(sandbox, program, &args, workspace);
+        match output {
+            Ok(output) if output.status.success() => {
+                compatibility.push(Evidence::pass(
+                    &format!("compat.{name}"),
+                    name,
+                    "compatibility",
+                    backend,
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout).into_owned(),
+                ));
+            }
+            Ok(output) => {
+                compatibility.push(Evidence::error(
+                    &format!("compat.{name}"),
+                    name,
+                    "compatibility",
+                    backend,
+                    format!(
+                        "{} status={} stderr={:?}",
+                        output.status,
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr)
+                    ),
+                ));
+            }
+            Err(err) => {
+                compatibility.push(Evidence::error(
+                    &format!("compat.{name}"),
+                    name,
+                    "compatibility",
+                    backend,
+                    err.to_string(),
+                ));
+            }
+        }
     }
 
-    // Environment leakage.
-    std::env::set_var("SANDBOXRS_TEST_SECRET", "super-secret-value");
-    let mut env_cleared = compat_sandbox.command(attacker);
-    env_cleared
-        .env_clear()
-        .args(["env", "SANDBOXRS_TEST_SECRET"])
-        .stdout(sandboxrs_windows::Stdio::piped())
-        .stderr(sandboxrs_windows::Stdio::piped());
-    let leaked = env_cleared.output();
-    match leaked {
+    // Real cargo workload: build and run a tiny fixture with a hostile build.rs.
+    let fixture = workspace.join("malicious-rust");
+    let _ = fs_remove_all(&fixture);
+    fs::create_dir_all(fixture.join("src")).unwrap();
+    fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"malicious-rust\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.join("src/main.rs"),
+        "fn main() { println!(\"hostile-ok\"); }\n",
+    )
+    .unwrap();
+    let secret_path = std::env::temp_dir().join("sandboxrs-hostile-secret.txt");
+    fs::write(&secret_path, b"top-secret").unwrap();
+    fs::write(
+        fixture.join("build.rs"),
+        format!(
+            "fn main() {{ let secret = std::path::Path::new(r\"{}\"); let _ = std::fs::read(secret); }}\n",
+            secret_path.display()
+        ),
+    )
+    .unwrap();
+    let cargo_sandbox = match Sandbox::builder(&fixture)
+        .read_only(exe_dir())
+        .read_only(
+            std::env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("C:\\Users\\runneradmin\\.cargo")),
+        )
+        .read_only(
+            std::env::var_os("RUSTUP_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("C:\\Users\\runneradmin\\.rustup")),
+        )
+        .timeout(Duration::from_secs(60))
+        .build()
+    {
+        Ok(sandbox) => sandbox,
+        Err(err) => {
+            compatibility.push(Evidence::error(
+                "compat.cargo-build",
+                "cargo build malicious fixture",
+                "compatibility",
+                backend,
+                format!("sandbox did not build: {err}"),
+            ));
+            let _ = attacker;
+            return;
+        }
+    };
+    let output = sandbox_output(&cargo_sandbox, "cargo", &["build"], &fixture);
+    match output {
+        Ok(output) if output.status.success() => {
+            compatibility.push(Evidence::pass(
+                "compat.cargo-build",
+                "cargo build malicious fixture",
+                "compatibility",
+                backend,
+                output.status.code(),
+                "build succeeded while secret stayed outside policy",
+            ));
+        }
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let blocked = !stdout.contains("super-secret-value");
-            report.environment.push(Check {
-                name: "env_clear removes secret".into(),
-                expected: "true".into(),
-                actual: format!(
-                    "blocked={blocked} status={} stdout={stdout:?} stderr={stderr:?}",
-                    output.status
+            compatibility.push(Evidence::error(
+                "compat.cargo-build",
+                "cargo build malicious fixture",
+                "compatibility",
+                backend,
+                format!(
+                    "status={} stderr={:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
                 ),
-                pass: blocked,
-            });
+            ));
         }
         Err(err) => {
-            report.environment.push(Check {
-                name: "env_clear removes secret".into(),
-                expected: "true".into(),
-                actual: format!("launch blocked (no secret exposure): {err}"),
-                pass: true,
-            });
+            compatibility.push(Evidence::error(
+                "compat.cargo-build",
+                "cargo build malicious fixture",
+                "compatibility",
+                backend,
+                format!("process did not start: {err}"),
+            ));
         }
     }
-
-    let _ = fs::remove_dir_all(&fixture);
-    report.totals = Totals {
-        security_contract: score(&report.security_contract),
-        path_escape: score(&report.path_escape),
-        lifecycle: score(&report.lifecycle),
-        compatibility: score(&report.compatibility),
-        environment: score(&report.environment),
-    };
-    report
+    let _ = fs::remove_file(&secret_path);
 }
 
 #[cfg(windows)]
-fn run_cwd(
+fn allowed_case(
+    security: &mut Vec<Evidence>,
+    id: &str,
+    name: &str,
+    sandbox: &Sandbox,
+    attacker: &str,
+    args: &[&str],
+    cwd: &Path,
+    backend: &str,
+    postcondition: impl FnOnce() -> bool,
+) {
+    let output = sandbox_output(sandbox, attacker, args, cwd);
+    match output {
+        Ok(output) if output.status.success() && postcondition() => {
+            security.push(Evidence::pass(
+                id,
+                name,
+                "filesystem",
+                backend,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+            ));
+        }
+        Ok(output) => {
+            security.push(Evidence::error(
+                id,
+                name,
+                "filesystem",
+                backend,
+                format!(
+                    "allowed operation failed or postcondition invalid: {} stderr={:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            ));
+        }
+        Err(err) => {
+            security.push(Evidence::error(
+                id,
+                name,
+                "filesystem",
+                backend,
+                format!("process did not start: {err}"),
+            ));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn forbidden_case(
+    security: &mut Vec<Evidence>,
+    id: &str,
+    name: &str,
+    sandbox: &Sandbox,
+    attacker: &str,
+    args: &[&str],
+    cwd: &Path,
+    backend: &str,
+    postcondition: impl FnOnce() -> bool,
+) {
+    if !native_succeeds(Command::new(attacker).args(args).current_dir(cwd)) {
+        security.push(Evidence::error(
+            id,
+            name,
+            "security",
+            backend,
+            "native control failed; attack is not possible outside the sandbox",
+        ));
+        return;
+    }
+    let output = sandbox_output(sandbox, attacker, args, cwd);
+    match output {
+        Ok(output) if output.status.success() => {
+            security.push(Evidence::escape(
+                id,
+                name,
+                "security",
+                backend,
+                output.status.code(),
+                "forbidden operation succeeded inside sandbox",
+            ));
+        }
+        Ok(output) if !output.status.success() && postcondition() => {
+            security.push(Evidence::pass(
+                id,
+                name,
+                "security",
+                backend,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        Ok(output) => {
+            security.push(Evidence::error(
+                id,
+                name,
+                "security",
+                backend,
+                format!("blocked but postcondition invalid: {}", output.status),
+            ));
+        }
+        Err(err) => {
+            security.push(Evidence::error(
+                id,
+                name,
+                "security",
+                backend,
+                format!("process did not start; attack was not actually attempted: {err}"),
+            ));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn sandbox_output(
     sandbox: &Sandbox,
     program: &str,
     args: &[&str],
     cwd: &Path,
-) -> (std::process::ExitStatus, String) {
-    let output = run_output(sandbox, program, args, cwd);
-    (
-        output.status,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-    )
-}
-
-#[cfg(windows)]
-fn run_output(sandbox: &Sandbox, program: &str, args: &[&str], cwd: &Path) -> SandboxOutput {
+) -> Result<SandboxOutput, SandboxError> {
     let mut command = sandbox.command(program);
     command.args(args);
     command.current_dir(cwd);
-    command
-        .stdout(sandboxrs_windows::Stdio::piped())
-        .stderr(sandboxrs_windows::Stdio::piped());
-    command.output().expect("sandboxed command should run")
-}
-
-#[cfg(windows)]
-fn expect_run(
-    name: &str,
-    expected_success: bool,
-    output: (std::process::ExitStatus, String),
-) -> Check {
-    let pass = output.0.success() == expected_success;
-    Check {
-        name: name.into(),
-        expected: if expected_success {
-            "success"
-        } else {
-            "denied"
-        }
-        .into(),
-        actual: format!("status={} stdout={:?}", output.0, output.1),
-        pass,
-    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.output()
 }
 
 #[cfg(windows)]
@@ -559,30 +1864,53 @@ fn native_succeeds(command: &mut Command) -> bool {
 }
 
 #[cfg(windows)]
-fn score(checks: &[Check]) -> Score {
-    Score {
-        passed: checks.iter().filter(|check| check.pass).count(),
-        total: checks.len(),
-    }
-}
-
-#[cfg(windows)]
 fn process_exists(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    // SAFETY: OpenProcess with a pid is a normal Win32 query.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
         return false;
     }
     let mut code = 0u32;
+    // SAFETY: The handle is valid and `code` is a valid out-parameter.
     let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
     let active = ok != 0 && code == STILL_ACTIVE as u32;
+    // SAFETY: The handle was opened above and is no longer needed.
     unsafe {
         CloseHandle(handle);
     }
     active
+}
+
+#[cfg(windows)]
+fn create_junction(link: &Path, target: &Path) -> bool {
+    let output = Command::new("cmd")
+        .args(["/c", "mklink", "/J", p(link), p(target)])
+        .output()
+        .ok();
+    output.map(|o| o.status.success()).unwrap_or(false) && link.exists()
+}
+
+#[cfg(windows)]
+fn fs_remove_all(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir_all(path)
+}
+
+#[cfg(windows)]
+fn p(path: &Path) -> &str {
+    path.to_str()
+        .expect("path must be valid UTF-8 for eval args")
+}
+
+#[cfg(windows)]
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(windows)]
@@ -594,14 +1922,6 @@ fn running_elevated() -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(windows)]
