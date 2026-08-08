@@ -24,7 +24,7 @@ jobs:
           $password = ConvertTo-SecureString "Sandboxrs!Eval2026" -AsPlainText -Force
           $user = "sandboxrs-eval"
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $user -Password $password -NoPasswordChange | Out-Null
+            New-LocalUser -Name $user -Password $password | Out-Null
           }
           $cred = New-Object System.Management.Automation.PSCredential($user, $password)
           $args = @("--backend", "appcontainer", "--require-standard-user", "--report", "sandboxrs-eval.json")
