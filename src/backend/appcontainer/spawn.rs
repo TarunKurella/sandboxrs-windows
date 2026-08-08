@@ -562,11 +562,21 @@ fn build_env_block(
             }
         }
         // CreateProcessW also needs drive current-directory variables
-        // ("=C:=C:\\...") when a custom environment block is supplied.
+        // ("=C:=C:\\...") when a custom environment block is supplied. They are
+        // hidden from std::env in some launch contexts, so synthesize them.
         for (key, value) in std::env::vars_os() {
             if key.to_string_lossy().starts_with('=') {
                 entries.push((key, value));
             }
+        }
+        let mut drives = vec![OsString::from("C:")];
+        if let Some(system_drive) = std::env::var_os("SystemDrive") {
+            drives.push(system_drive);
+        }
+        for drive in drives {
+            let key = OsString::from(format!("={}", drive.to_string_lossy()));
+            let value = OsString::from(format!("{}\\", drive.to_string_lossy()));
+            entries.push((key, value));
         }
     }
     entries.sort_by(|a, b| {
