@@ -1247,13 +1247,27 @@ fn job_breakaway_suite(
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0);
-        if !native_status
+        let native_ok = native_status
             .as_ref()
             .map(|status| status.success())
-            .unwrap_or(false)
-            || native_pid == 0
-            || !process_exists(native_pid)
-        {
+            .unwrap_or(false);
+        if !native_ok && native_pid == 0 {
+            // The host itself is inside a Job Object that denies
+            // CREATE_BREAKAWAY_FROM_JOB/DETACHED_PROCESS, so this mode cannot
+            // be exercised on this environment. That is not a sandbox pass.
+            security.push(Evidence::unsupported(
+                id,
+                name,
+                "job",
+                backend,
+                format!(
+                    "native breakaway is blocked by the host Job Object \
+                     (status={native_status:?}); not creditable to the sandbox"
+                ),
+            ));
+            continue;
+        }
+        if !native_ok || native_pid == 0 || !process_exists(native_pid) {
             if native_pid != 0 {
                 let _ = kill_process(native_pid);
             }
