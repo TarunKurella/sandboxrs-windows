@@ -14,6 +14,7 @@ pub struct SandboxOutput {
 }
 
 impl SandboxOutput {
+    #[allow(dead_code)]
     pub(crate) fn from_output(
         output: std::process::Output,
         backend: BackendKind,

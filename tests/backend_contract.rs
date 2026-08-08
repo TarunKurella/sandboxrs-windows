@@ -23,7 +23,10 @@ mod backend_contract {
             "workspace write should succeed: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(fs::read_to_string(workspace.join("out.txt")).unwrap(), "attacker");
+        assert_eq!(
+            fs::read_to_string(workspace.join("out.txt")).unwrap(),
+            "attacker"
+        );
 
         let output = common::run_at(
             &sandbox,
@@ -55,10 +58,7 @@ mod backend_contract {
         let denied = [
             &["write", targets[0].to_str().unwrap()][..],
             &["spawn-write", targets[1].to_str().unwrap()][..],
-            &[
-                "spawn-grandchild-write",
-                targets[2].to_str().unwrap(),
-            ][..],
+            &["spawn-grandchild-write", targets[2].to_str().unwrap()][..],
         ];
         for args in denied {
             let output = common::run_at(&sandbox, &workspace, common::attacker(), args);

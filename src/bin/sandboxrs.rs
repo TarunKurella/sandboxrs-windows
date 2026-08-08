@@ -7,7 +7,9 @@ use serde::Serialize;
 
 #[derive(Debug)]
 enum Command {
-    Doctor { json: bool },
+    Doctor {
+        json: bool,
+    },
     Exec {
         json: bool,
         workspace: PathBuf,
@@ -47,7 +49,9 @@ fn main() -> ExitCode {
             eprintln!("usage:");
             eprintln!("  sandboxrs doctor [--json]");
             eprintln!("  sandboxrs exec [--json] --workspace PATH [--ro PATH]... [--rw PATH]...");
-            eprintln!("    [--timeout-ms N] [--max-memory-bytes N] [--max-processes N] -- CMD ARGS...");
+            eprintln!(
+                "    [--timeout-ms N] [--max-memory-bytes N] [--max-processes N] -- CMD ARGS..."
+            );
             ExitCode::from(2)
         }
     }
@@ -81,7 +85,14 @@ fn run_doctor(json: bool) -> ExitCode {
         for entry in &probe.entries {
             println!("{}", entry.backend.label());
             println!("  export      {}", yes_no(entry.export_present));
-            println!("  probe       {}", if entry.usable { "success" } else { "unavailable" });
+            println!(
+                "  probe       {}",
+                if entry.usable {
+                    "success"
+                } else {
+                    "unavailable"
+                }
+            );
             println!("  detail      {}", entry.detail);
         }
         println!("Admin required: no");
@@ -108,8 +119,7 @@ fn run_exec(
         return ExitCode::from(2);
     }
 
-    let mut builder = Sandbox::builder(workspace)
-        .preferred_backend(BackendPreference::Auto);
+    let mut builder = Sandbox::builder(workspace).preferred_backend(BackendPreference::Auto);
     for path in read_only {
         builder = builder.read_only(path);
     }
@@ -130,9 +140,9 @@ fn run_exec(
         let mut command = sandbox.command(&argv[0]);
         command.args(argv[1..].iter().cloned());
         command
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdin(sandboxrs_windows::Stdio::inherit())
+            .stdout(sandboxrs_windows::Stdio::piped())
+            .stderr(sandboxrs_windows::Stdio::piped());
         command.output()
     }) {
         Ok(output) => {
@@ -167,10 +177,7 @@ fn run_exec(
         }
         Err(err) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "error": err.to_string() })
-                );
+                println!("{}", serde_json::json!({ "error": err.to_string() }));
             } else {
                 eprintln!("sandboxrs: {err}");
             }
@@ -187,7 +194,11 @@ fn exit_code_for(status: std::process::ExitStatus) -> ExitCode {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn parse_args<I>(args: I) -> Result<Command, String>

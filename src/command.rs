@@ -1,11 +1,10 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use crate::child::SandboxChild;
 use crate::sandbox::Sandbox;
-use crate::{SandboxError, SandboxOutput};
+use crate::{SandboxError, SandboxOutput, Stdio};
 
 /// A sandboxed command, mirroring the familiar `std::process::Command` API.
 pub struct SandboxCommand<'a> {
@@ -97,9 +96,9 @@ impl<'a> SandboxCommand<'a> {
             self.envs.clone(),
             self.removals.clone(),
             self.current_dir.clone(),
-            self.stdin.unwrap_or(Stdio::inherit()),
-            self.stdout.unwrap_or(Stdio::inherit()),
-            self.stderr.unwrap_or(Stdio::inherit()),
+            self.stdin.take().unwrap_or(Stdio::inherit()),
+            self.stdout.take().unwrap_or(Stdio::inherit()),
+            self.stderr.take().unwrap_or(Stdio::inherit()),
         )
     }
 

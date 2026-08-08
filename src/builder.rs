@@ -15,6 +15,7 @@ pub struct SandboxBuilder {
     max_memory: Option<u64>,
     max_processes: Option<u32>,
     preferred_backend: BackendPreference,
+    identity: Option<String>,
 }
 
 impl SandboxBuilder {
@@ -27,6 +28,7 @@ impl SandboxBuilder {
             max_memory: None,
             max_processes: None,
             preferred_backend: BackendPreference::Auto,
+            identity: None,
         }
     }
 
@@ -66,6 +68,16 @@ impl SandboxBuilder {
         self
     }
 
+    /// Explicit AppContainer identity/profile name.
+    ///
+    /// Defaults to a unique `sandbox-<hex>` name when omitted. Two sandboxes
+    /// sharing an identity share an AppContainer profile and therefore its
+    /// filesystem permissions.
+    pub fn identity(mut self, identity: impl Into<String>) -> Self {
+        self.identity = Some(identity.into());
+        self
+    }
+
     /// Validate policy, probe/select a backend, and perform setup.
     ///
     /// This is a real initialization boundary. If any required step fails, no
@@ -74,11 +86,13 @@ impl SandboxBuilder {
         let plan = FilesystemPlan::compile(&self.workspace, &self.read_only, &self.read_write)?;
         let backend_kind = backend::select(self.preferred_backend)?;
         backend::validate(&backend_kind, &plan)?;
+        let identity = self.identity.unwrap_or_else(generate_sandbox_identity);
 
         Ok(Sandbox::new(
             self.workspace,
             plan,
             backend_kind,
+            identity,
             ResourceLimits {
                 max_processes: self.max_processes,
                 max_memory: self.max_memory,
@@ -86,5 +100,12 @@ impl SandboxBuilder {
             self.timeout,
         ))
     }
+}
 
+fn generate_sandbox_identity() -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or_else(|_| std::process::id() as u64);
+    format!("sandbox-{nonce:016x}")
 }

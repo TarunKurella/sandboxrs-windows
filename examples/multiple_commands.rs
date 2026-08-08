@@ -9,10 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .read_only(std::env::temp_dir())
         .build()?;
 
-    for (program, args) in [
-        ("cargo", vec!["check"]),
-        ("git", vec!["status", "--short"]),
-    ] {
+    for (program, args) in [("cargo", vec!["check"]), ("git", vec!["status", "--short"])] {
         let mut command = sandbox.command(program);
         command.args(args);
         let output = command.output()?;

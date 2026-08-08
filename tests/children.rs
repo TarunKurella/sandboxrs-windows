@@ -13,8 +13,8 @@ mod children {
         let mut command = sandbox.command(common::attacker());
         command.args(["spawn-many", "5"]);
         let mut child = command
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(sandboxrs_windows::Stdio::null())
+            .stderr(sandboxrs_windows::Stdio::null())
             .spawn()
             .expect("spawn should work");
         std::thread::sleep(std::time::Duration::from_millis(500));

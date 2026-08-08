@@ -1,0 +1,70 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+//
+// SandboxSpec.fbs schema for the Experimental_CreateProcessInSandbox
+// FlatBuffer contract (file identifier "SBOX"). This copy is documentation for
+// the private compiler in src/backend/modern/spec.rs.
+//
+// Field order, defaults, and enum values are wire-format and must not be
+// reordered.
+
+namespace SandboxTechSpecLayout;
+
+enum IntegrityLevel : byte { system_default, inherit, untrusted, low, medium, high }
+
+table SandboxSpec {
+    version:string (required);
+    app_container:bool = false;
+    integrity_level:uint32 = 0 (deprecated);
+    disallow_win32k_system_calls:bool = false;
+    ui_restrictions:uint64 = 0;
+    least_privilege:bool = false;
+    capabilities:string;
+    fs_read_write:[string];
+    fs_read_only:[string];
+    network_policy: NetworkPolicy;
+    integrity:IntegrityLevel = system_default;
+    fs_deny:[string];
+}
+
+table proxy_info {
+    url:string;
+}
+
+enum FilterAction : byte { deny, allow }
+enum IpProtocol : byte { any, tcp, udp, icmpv4, icmpv6 }
+
+table ip_subnet {
+    address:string;
+    prefix_length:ubyte = 0;
+}
+
+table destination_rule {
+    subnet:ip_subnet;
+    except:[ip_subnet];
+}
+
+table port_rule {
+    protocol:IpProtocol = any;
+    port:uint16 = 0;
+    end_port:uint16 = 0;
+}
+
+table endpoint_rule {
+    destinations:[destination_rule];
+    ports:[port_rule];
+}
+
+table endpoint_policy {
+    default_action:FilterAction = deny;
+    allow:[endpoint_rule];
+    deny:[endpoint_rule];
+}
+
+table NetworkPolicy {
+    proxy:proxy_info;
+    egress:endpoint_policy;
+    allowed_appcontainer_peer:string;
+}
+
+root_type SandboxSpec;
+file_identifier "SBOX";

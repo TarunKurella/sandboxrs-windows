@@ -1,6 +1,4 @@
 use std::io;
-use std::os::windows::io::AsRawHandle;
-
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -34,10 +32,10 @@ impl Job {
         Ok(job)
     }
 
-    pub(crate) fn assign(&self, child: &std::process::Child) -> Result<(), SandboxError> {
-        let process_handle = child.as_raw_handle() as HANDLE;
-        // SAFETY: `process_handle` is a live process handle owned by `child`,
-        // and the job handle remains valid for the lifetime of `self`.
+    pub(crate) fn assign_raw(&self, process_handle: HANDLE) -> Result<(), SandboxError> {
+        // SAFETY: `process_handle` must be a live process handle supplied by
+        // the caller, and the job handle remains valid for the lifetime of
+        // `self`.
         let ok = unsafe { AssignProcessToJobObject(self.handle, process_handle) };
         if ok == 0 {
             return Err(SandboxError::Io(io::Error::last_os_error()));
@@ -88,8 +86,7 @@ impl Job {
             SetInformationJobObject(
                 self.handle,
                 JobObjectExtendedLimitInformation,
-                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION)
-                    .cast::<core::ffi::c_void>(),
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<core::ffi::c_void>(),
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             )
         };

@@ -1,12 +1,11 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use crate::child::SandboxChild;
 use crate::filesystem::FilesystemPlan;
-use crate::sandbox::{BackendProbe, BackendProbeEntry};
 use crate::sandbox::Sandbox;
-use crate::{BackendKind, BackendPreference, SandboxError};
+use crate::sandbox::{BackendProbe, BackendProbeEntry};
+use crate::{BackendKind, BackendPreference, SandboxError, Stdio};
 
 pub(crate) mod appcontainer;
 pub(crate) mod modern;
@@ -31,10 +30,7 @@ pub(crate) fn select(preference: BackendPreference) -> Result<BackendKind, Sandb
 }
 
 /// Validate that the selected backend can represent the filesystem plan.
-pub(crate) fn validate(
-    backend: &BackendKind,
-    plan: &FilesystemPlan,
-) -> Result<(), SandboxError> {
+pub(crate) fn validate(backend: &BackendKind, plan: &FilesystemPlan) -> Result<(), SandboxError> {
     modern::validate(*backend, plan)?;
     appcontainer::validate(*backend, plan)
 }
@@ -50,7 +46,9 @@ pub(crate) fn probe_report(preference: BackendPreference) -> BackendProbe {
         detail: modern_result.detail,
     };
     if matches!(preference, BackendPreference::WindowsSandboxApi) && !modern_entry.usable {
-        return BackendProbe { entries: vec![modern_entry] };
+        return BackendProbe {
+            entries: vec![modern_entry],
+        };
     }
     entries.push(modern_entry);
 
@@ -62,9 +60,7 @@ pub(crate) fn probe_report(preference: BackendPreference) -> BackendProbe {
         detail: appcontainer_result.detail,
     });
 
-    if matches!(preference, BackendPreference::AppContainer)
-        && !entries[1].usable
-    {
+    if matches!(preference, BackendPreference::AppContainer) && !entries[1].usable {
         return BackendProbe { entries };
     }
 
@@ -85,7 +81,7 @@ pub(crate) fn spawn(
 ) -> Result<SandboxChild, SandboxError> {
     #[cfg(windows)]
     {
-        let _ = (
+        modern::spawn::spawn(
             sandbox,
             program,
             args,
@@ -96,8 +92,7 @@ pub(crate) fn spawn(
             stdin,
             stdout,
             stderr,
-        );
-        Err(SandboxError::SandboxUnavailable)
+        )
     }
     #[cfg(not(windows))]
     {

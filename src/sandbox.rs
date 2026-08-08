@@ -5,20 +5,24 @@ use crate::backend;
 use crate::builder::SandboxBuilder;
 use crate::command::SandboxCommand;
 use crate::filesystem::FilesystemPlan;
-use crate::{BackendKind, BackendPreference, ResourceLimits, SandboxError};
+use crate::{BackendKind, BackendPreference, ResourceLimits};
 
 /// Reusable, validated authority boundary.
 ///
 /// A sandbox represents one policy. Multiple commands may run inside it
 /// without rebuilding policy each time.
+#[derive(Debug)]
+#[allow(dead_code)]
 pub struct Sandbox {
     workspace: PathBuf,
     plan: FilesystemPlan,
     backend: BackendKind,
+    identity: String,
     limits: ResourceLimits,
     timeout: Option<Duration>,
 }
 
+#[allow(dead_code)]
 impl Sandbox {
     /// Start building a sandbox whose workspace is read-write.
     pub fn builder(workspace: impl AsRef<Path>) -> SandboxBuilder {
@@ -29,6 +33,7 @@ impl Sandbox {
         workspace: PathBuf,
         plan: FilesystemPlan,
         backend: BackendKind,
+        identity: String,
         limits: ResourceLimits,
         timeout: Option<Duration>,
     ) -> Self {
@@ -36,6 +41,7 @@ impl Sandbox {
             workspace,
             plan,
             backend,
+            identity,
             limits,
             timeout,
         }
@@ -49,6 +55,10 @@ impl Sandbox {
     /// The backend enforcing this sandbox.
     pub fn backend(&self) -> BackendKind {
         self.backend
+    }
+
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
     }
 
     pub(crate) fn workspace(&self) -> &Path {

@@ -25,7 +25,10 @@ pub enum SandboxError {
     },
 
     /// A filesystem root is malformed or outside supported policy.
-    InvalidPath { path: std::path::PathBuf, reason: String },
+    InvalidPath {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 
     /// Filesystem rules could not be compiled for a backend.
     PolicyCompileFailed {
@@ -81,11 +84,7 @@ impl fmt::Display for SandboxError {
                 win32_code,
                 message,
             } => {
-                write!(
-                    f,
-                    "{} backend failed to create process",
-                    backend.label()
-                )?;
+                write!(f, "{} backend failed to create process", backend.label())?;
                 if let Some(code) = win32_code {
                     write!(f, " (Win32 error: {code})")?;
                 }

@@ -20,10 +20,13 @@ mod timeout_tests {
         let mut command = sandbox.command(common::attacker());
         command.args(["spawn-many", "3"]);
         command
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(sandboxrs_windows::Stdio::null())
+            .stderr(sandboxrs_windows::Stdio::null());
         let output = command.output().expect("output should complete");
-        assert!(!output.status.success(), "timed out tree should not succeed");
+        assert!(
+            !output.status.success(),
+            "timed out tree should not succeed"
+        );
         common::cleanup(workspace);
     }
 }

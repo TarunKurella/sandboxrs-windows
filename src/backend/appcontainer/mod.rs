@@ -20,10 +20,7 @@ pub(crate) fn probe() -> ProbeOutcome {
     }
 }
 
-pub(crate) fn validate(
-    backend: BackendKind,
-    _plan: &FilesystemPlan,
-) -> Result<(), SandboxError> {
+pub(crate) fn validate(backend: BackendKind, _plan: &FilesystemPlan) -> Result<(), SandboxError> {
     let _ = backend;
     Ok(())
 }

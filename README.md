@@ -5,7 +5,7 @@ processes with constrained filesystem authority. It prefers Windows' modern
 composable sandbox API when available and falls back to AppContainer.
 
 ```rust
-use sandboxrs_windows::Sandbox;
+use sandboxrs_windows::{Sandbox, Stdio};
 
 let sandbox = Sandbox::builder(r"C:\repo")
     .read_only(r"C:\Users\me\.rustup")
@@ -15,6 +15,8 @@ let sandbox = Sandbox::builder(r"C:\repo")
 let output = sandbox
     .command("cargo")
     .arg("test")
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .output()?;
 ```
 
@@ -23,25 +25,30 @@ Java, Go, and shell scripts that invokes the same library.
 
 ## Status
 
-This repository is the M0/M1 scaffold:
+The modern `Experimental_CreateProcessInSandbox` backend is implemented:
 
 - Public Rust API: `SandboxBuilder`, `Sandbox`, `SandboxCommand`, `SandboxChild`,
   `SandboxOutput`, `BackendKind`, diagnostics.
 - Private `FilesystemPlan`: normalization, duplicate/conflict validation, and
   more-specific-wins overlap rules.
-- Job Object lifecycle wrapper for descendant containment, process limits, and
-  memory limits.
+- `SandboxSpec` FlatBuffer compilation (schema version `0.1.0`, file identifier
+  `SBOX`) from the validated filesystem plan.
+- Dynamic `processmodel.dll` loading from System32, `Experimental_QuerySandboxSupport`
+  capability checks, and a real M0 probe that launches `cmd /c exit 0` and
+  verifies an outside-write is denied without admin.
+- Suspended process creation, Job Object assignment before resume, process/memory
+  limits, `KILL_ON_JOB_CLOSE`, timeout-driven tree termination, and explicit kill.
+- Piped/inherit/null stdio through `STARTUPINFO`, wide environment blocks with
+  `CREATE_UNICODE_ENVIRONMENT`, and a downlevel retry without the environment
+  block when the API rejects it.
 - Fail-closed backend selection. There is no silent `std::process::Command`
   fallback.
 
-The experimental `Experimental_CreateProcessInSandbox` backend currently
-resolves the DLL export during probing, but the M0 launch probe still needs to
-be proven on a real Windows machine before `build()` can select it. The
-AppContainer backend is scheduled for M3 and is intentionally not advertised
-until it can pass the shared contract suite.
-
-Until M0/M1 land on Windows, `SandboxBuilder::build()` fails closed with
-`SandboxUnavailable` on Windows and `UnsupportedPlatform` on other platforms.
+The backend must still be empirically validated on the target Windows 11
+machine/VDI; the contract tests are present but `#[ignore]`d until that M0 gate
+passes. The AppContainer fallback is scheduled for M3 and is intentionally not
+advertised until it can pass the shared contract suite. On non-Windows hosts,
+`SandboxBuilder::build()` fails closed with `UnsupportedPlatform`.
 
 ## Commands
 

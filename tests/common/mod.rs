@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -29,11 +31,7 @@ pub fn workspace_sandbox(workspace: &std::path::Path) -> sandboxrs_windows::Sand
         .expect("sandbox should build")
 }
 
-pub fn run(
-    sandbox: &Sandbox,
-    program: &str,
-    args: &[&str],
-) -> sandboxrs_windows::SandboxOutput {
+pub fn run(sandbox: &Sandbox, program: &str, args: &[&str]) -> sandboxrs_windows::SandboxOutput {
     run_at(sandbox, std::path::Path::new("."), program, args)
 }
 
@@ -47,8 +45,8 @@ pub fn run_at(
     command.args(args);
     command.current_dir(cwd);
     command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(sandboxrs_windows::Stdio::piped())
+        .stderr(sandboxrs_windows::Stdio::piped());
     command.output().expect("sandboxed command should run")
 }
 

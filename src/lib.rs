@@ -33,6 +33,31 @@ pub use error::SandboxError;
 pub use output::SandboxOutput;
 pub use sandbox::{BackendProbe, BackendProbeEntry, Sandbox};
 
+/// Standard stream mode for a sandboxed command.
+///
+/// This mirrors `std::process::Stdio`, which is opaque and therefore cannot be
+/// inspected by a library after it is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stdio {
+    Inherit,
+    Null,
+    Piped,
+}
+
+impl Stdio {
+    pub fn inherit() -> Self {
+        Self::Inherit
+    }
+
+    pub fn null() -> Self {
+        Self::Null
+    }
+
+    pub fn piped() -> Self {
+        Self::Piped
+    }
+}
+
 /// Backend that enforces a sandboxed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendKind {
@@ -49,7 +74,7 @@ impl BackendKind {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::WindowsSandboxApi => "Windows Sandbox API",
             Self::AppContainer => "AppContainer",
@@ -67,6 +92,7 @@ pub enum BackendPreference {
 
 /// Resource and lifecycle limits applied through the Job Object.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub(crate) struct ResourceLimits {
     pub(crate) max_processes: Option<u32>,
     pub(crate) max_memory: Option<u64>,

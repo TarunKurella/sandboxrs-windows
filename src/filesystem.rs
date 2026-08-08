@@ -12,6 +12,7 @@ pub(crate) enum Access {
 }
 
 impl Access {
+    #[allow(dead_code)]
     pub(crate) fn is_readable(self) -> bool {
         matches!(self, Self::ReadOnly | Self::ReadWrite)
     }
@@ -55,15 +56,33 @@ impl FilesystemPlan {
     ) -> Result<Self, SandboxError> {
         let workspace = normalize_root(workspace)?;
         let mut merged: Vec<PathRule> = Vec::new();
-        push_rule(&mut merged, PathRule { path: workspace, access: Access::ReadWrite })?;
+        push_rule(
+            &mut merged,
+            PathRule {
+                path: workspace,
+                access: Access::ReadWrite,
+            },
+        )?;
 
         for path in read_only {
             let path = normalize_root(path)?;
-            push_rule(&mut merged, PathRule { path, access: Access::ReadOnly })?;
+            push_rule(
+                &mut merged,
+                PathRule {
+                    path,
+                    access: Access::ReadOnly,
+                },
+            )?;
         }
         for path in read_write {
             let path = normalize_root(path)?;
-            push_rule(&mut merged, PathRule { path, access: Access::ReadWrite })?;
+            push_rule(
+                &mut merged,
+                PathRule {
+                    path,
+                    access: Access::ReadWrite,
+                },
+            )?;
         }
 
         merged.sort_by_key(|rule| std::cmp::Reverse(rule.path.components().count()));
@@ -74,6 +93,7 @@ impl FilesystemPlan {
         &self.rules
     }
 
+    #[allow(dead_code)]
     pub(crate) fn access_for(&self, path: &Path) -> Access {
         let normalized = normalize_root(path).unwrap_or_else(|_| path.to_path_buf());
         for rule in &self.rules {
@@ -137,7 +157,9 @@ fn normalize_root(path: &Path) -> Result<PathBuf, SandboxError> {
     }
 
     let original = path.to_string_lossy().into_owned();
-    let trimmed = original.trim_end_matches(std::path::MAIN_SEPARATOR).to_owned();
+    let trimmed = original
+        .trim_end_matches(std::path::MAIN_SEPARATOR)
+        .to_owned();
     let normalized = if !trimmed.is_empty() && Path::new(&trimmed).is_absolute() {
         trimmed
     } else {
@@ -161,6 +183,7 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn path_is_within(parent: &Path, child: &Path) -> bool {
     let parent_parts: Vec<_> = parent.components().collect();
     let child_parts: Vec<_> = child.components().collect();
@@ -173,6 +196,7 @@ fn path_is_within(parent: &Path, child: &Path) -> bool {
         .all(|(a, b)| component_equal(a, b))
 }
 
+#[allow(dead_code)]
 fn component_equal(a: &Component<'_>, b: &Component<'_>) -> bool {
     let a = a.as_os_str();
     let b = b.as_os_str();
@@ -205,10 +229,19 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.access_for(Path::new("/workspace/file.txt")).is_writable());
-        assert!(!plan.access_for(Path::new("/workspace/.readonly/secret.txt")).is_writable());
-        assert!(plan.access_for(Path::new("/workspace/.readonly/secret.txt")).is_readable());
-        assert_eq!(plan.access_for(Path::new("/outside/file.txt")), Access::Hidden);
+        assert!(plan
+            .access_for(Path::new("/workspace/file.txt"))
+            .is_writable());
+        assert!(!plan
+            .access_for(Path::new("/workspace/.readonly/secret.txt"))
+            .is_writable());
+        assert!(plan
+            .access_for(Path::new("/workspace/.readonly/secret.txt"))
+            .is_readable());
+        assert_eq!(
+            plan.access_for(Path::new("/outside/file.txt")),
+            Access::Hidden
+        );
     }
 
     #[test]
