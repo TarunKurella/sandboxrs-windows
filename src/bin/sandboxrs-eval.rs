@@ -225,7 +225,7 @@ fn main() {
     }
 
     #[cfg(windows)]
-    let report = run_windows_evals(&backend_arg, &mut allow_unsupported);
+    let report = run_windows_evals(&backend_arg, allow_unsupported);
     #[cfg(not(windows))]
     let report = EvalReport {
         os: std::env::consts::OS.to_string(),
@@ -251,16 +251,13 @@ fn main() {
         eprintln!("security gate failed");
         std::process::exit(1);
     }
-    if !allow_unsupported && (report.security_score.error > 0 || report.security_score.escape > 0) {
-        std::process::exit(1);
-    }
     if report.runs.is_empty() {
         std::process::exit(1);
     }
 }
 
 #[cfg(windows)]
-fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalReport {
+fn run_windows_evals(backend_arg: &str, allow_unsupported: bool) -> EvalReport {
     use std::fs;
 
     let attacker_source = std::env::current_exe()
@@ -343,13 +340,6 @@ fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalRep
 
     for backend in requested {
         let run = run_backend(backend, &workspace, &readonly, &secret, &outside, &attacker);
-        if run
-            .security
-            .iter()
-            .any(|e| e.outcome == EvalOutcome::Unsupported)
-        {
-            *allow_unsupported = true;
-        }
         report.runs.push(run);
     }
 
@@ -362,11 +352,30 @@ fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalRep
         }
     }
 
-    report.gate_ok = report.runs.iter().all(|run| {
+    let any_escape_or_error = report.runs.iter().any(|run| {
         run.security
             .iter()
-            .all(|e| matches!(e.outcome, EvalOutcome::Pass | EvalOutcome::Unsupported))
+            .any(|e| matches!(e.outcome, EvalOutcome::Escape | EvalOutcome::Error))
     });
+    let required_executed = match backend_arg {
+        "appcontainer" | "windows-sandbox-api" | "modern" | "auto" => {
+            report.runs.iter().any(|run| {
+                run.security
+                    .iter()
+                    .any(|e| e.outcome != EvalOutcome::Unsupported)
+            })
+        }
+        _ => report.runs.iter().any(|run| {
+            run.security
+                .iter()
+                .any(|e| e.outcome != EvalOutcome::Unsupported)
+        }),
+    };
+    let required_ok = match backend_arg {
+        "windows-sandbox-api" | "modern" => allow_unsupported || required_executed,
+        _ => required_executed,
+    };
+    report.gate_ok = !any_escape_or_error && required_ok;
     let _ = fs_remove_all(&fixture);
     report
 }
@@ -381,12 +390,8 @@ fn run_backend(
     attacker: &str,
 ) -> BackendRun {
     let backend_name = backend.as_str().to_string();
-    let sandbox = match Sandbox::builder(workspace)
+    let sandbox = match sandbox_for(backend, workspace)
         .read_only(readonly)
-        .preferred_backend(match backend {
-            BackendKind::AppContainer => BackendPreference::AppContainer,
-            BackendKind::WindowsSandboxApi => BackendPreference::WindowsSandboxApi,
-        })
         .timeout(Duration::from_secs(30))
         .build()
     {
@@ -467,15 +472,30 @@ fn run_backend(
         secret,
         &backend_name,
     );
-    handle_suite(&mut security, &sandbox, attacker, secret, &backend_name);
+    handle_suite(
+        &mut security,
+        &sandbox,
+        attacker,
+        workspace,
+        secret,
+        &backend_name,
+    );
     job_breakaway_suite(&mut security, &sandbox, attacker, workspace, &backend_name);
-    resource_suite(&mut security, &sandbox, attacker, workspace, &backend_name);
+    resource_suite(&mut security, backend, attacker, workspace, &backend_name);
     environment_suite(&mut security, &sandbox, attacker, workspace, &backend_name);
-    concurrency_suite(&mut security, attacker, workspace, secret, &backend_name);
+    cross_sandbox_isolation_suite(
+        &mut security,
+        backend,
+        attacker,
+        workspace,
+        secret,
+        &backend_name,
+    );
 
     compatibility_suite(
         &mut compatibility,
         &sandbox,
+        backend,
         attacker,
         workspace,
         &backend_name,
@@ -498,6 +518,14 @@ fn run_backend(
         security_score,
         compatibility_score,
     }
+}
+
+#[cfg(windows)]
+fn sandbox_for(backend: BackendKind, workspace: &Path) -> sandboxrs_windows::SandboxBuilder {
+    Sandbox::builder(workspace).preferred_backend(match backend {
+        BackendKind::AppContainer => BackendPreference::AppContainer,
+        BackendKind::WindowsSandboxApi => BackendPreference::WindowsSandboxApi,
+    })
 }
 
 #[cfg(windows)]
@@ -1093,6 +1121,7 @@ fn handle_suite(
     security: &mut Vec<Evidence>,
     sandbox: &Sandbox,
     attacker: &str,
+    workspace: &Path,
     secret: &Path,
     backend: &str,
 ) {
@@ -1130,7 +1159,12 @@ fn handle_suite(
     }
     let value = format!("{:x}", raw as usize);
     if native_succeeds(Command::new(attacker).arg("read-handle").arg(&value)) {
-        let output = sandbox_output(sandbox, attacker, &["read-handle", value.as_str()], secret);
+        let output = sandbox_output(
+            sandbox,
+            attacker,
+            &["read-handle", value.as_str()],
+            workspace,
+        );
         match output {
             Ok(output) if !output.status.success() => {
                 security.push(Evidence::pass(
@@ -1200,6 +1234,44 @@ fn job_breakaway_suite(
     ] {
         let pidfile = workspace.join(format!("breakaway-{mode}.pid"));
         let _ = fs::remove_file(&pidfile);
+
+        // Native control: prove the same breakaway spawn is possible outside
+        // the sandbox before the sandboxed run can take credit for blocking it.
+        let native_status = Command::new(attacker)
+            .args(["spawn-breakaway", mode, p(&pidfile)])
+            .current_dir(workspace)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let native_pid: u32 = fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        if !native_status
+            .as_ref()
+            .map(|status| status.success())
+            .unwrap_or(false)
+            || native_pid == 0
+            || !process_exists(native_pid)
+        {
+            if native_pid != 0 {
+                let _ = kill_process(native_pid);
+            }
+            security.push(Evidence::error(
+                id,
+                name,
+                "job",
+                backend,
+                format!(
+                    "native breakaway control failed (pid={native_pid}, status={native_status:?}); \
+                     sandbox cannot be credited for this boundary"
+                ),
+            ));
+            continue;
+        }
+        let _ = kill_process(native_pid);
+        let _ = fs::remove_file(&pidfile);
+
         let mut parent = match sandbox
             .command(attacker)
             .arg("spawn-breakaway")
@@ -1284,13 +1356,13 @@ fn job_breakaway_suite(
 #[cfg(windows)]
 fn resource_suite(
     security: &mut Vec<Evidence>,
-    _sandbox: &Sandbox,
+    backend_kind: BackendKind,
     attacker: &str,
     workspace: &Path,
     backend: &str,
 ) {
     // Process-count boundary: 8 under limit succeeds; 1000 hits the limit.
-    let process_ok = Sandbox::builder(workspace)
+    let process_ok = sandbox_for(backend_kind, workspace)
         .max_processes(16)
         .timeout(Duration::from_secs(30))
         .build();
@@ -1365,7 +1437,7 @@ fn resource_suite(
     }
 
     // Memory boundary: 64 MB succeeds; 512 MB terminates.
-    let memory_ok = Sandbox::builder(workspace)
+    let memory_ok = sandbox_for(backend_kind, workspace)
         .max_memory(256 * 1024 * 1024)
         .timeout(Duration::from_secs(30))
         .build();
@@ -1441,7 +1513,7 @@ fn resource_suite(
     }
 
     // Timeout boundary: 1s under 5s succeeds; 60s under 2s times out.
-    let timeout_ok = Sandbox::builder(workspace)
+    let timeout_ok = sandbox_for(backend_kind, workspace)
         .timeout(Duration::from_secs(5))
         .build();
     match timeout_ok {
@@ -1449,7 +1521,7 @@ fn resource_suite(
             let short = sandbox_output(&sandbox, attacker, &["sleep", "1"], workspace);
             match short {
                 Ok(output) if output.status.success() => {
-                    let timeout_sandbox = Sandbox::builder(workspace)
+                    let timeout_sandbox = sandbox_for(backend_kind, workspace)
                         .timeout(Duration::from_secs(2))
                         .build()
                         .expect("timeout sandbox");
@@ -1579,8 +1651,9 @@ fn environment_suite(
 }
 
 #[cfg(windows)]
-fn concurrency_suite(
+fn cross_sandbox_isolation_suite(
     security: &mut Vec<Evidence>,
+    backend_kind: BackendKind,
     attacker: &str,
     workspace_a: &Path,
     secret: &Path,
@@ -1596,11 +1669,11 @@ fn concurrency_suite(
     ));
     let _ = fs_remove_all(&workspace_b);
     fs::create_dir_all(&workspace_b).unwrap();
-    let sandbox_a = Sandbox::builder(workspace_a)
+    let sandbox_a = sandbox_for(backend_kind, workspace_a)
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap();
-    let sandbox_b = Sandbox::builder(&workspace_b)
+    let sandbox_b = sandbox_for(backend_kind, &workspace_b)
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap();
@@ -1659,6 +1732,7 @@ fn concurrency_suite(
 fn compatibility_suite(
     compatibility: &mut Vec<Evidence>,
     sandbox: &Sandbox,
+    backend_kind: BackendKind,
     attacker: &str,
     workspace: &Path,
     backend: &str,
@@ -1725,17 +1799,34 @@ fn compatibility_suite(
         "fn main() { println!(\"hostile-ok\"); }\n",
     )
     .unwrap();
-    let secret_path = std::env::temp_dir().join("sandboxrs-hostile-secret.txt");
+    let hostile_root = workspace.parent().unwrap_or(workspace);
+    let secret_path = hostile_root.join("sandboxrs-hostile-secret.txt");
+    let outside_target = hostile_root.join("sandboxrs-hostile-outside.txt");
+    let child_target = hostile_root.join("sandboxrs-hostile-child.txt");
+    let leak_path = fixture.join("LEAKED_SECRET.txt");
     fs::write(&secret_path, b"top-secret").unwrap();
     fs::write(
         fixture.join("build.rs"),
         format!(
-            "fn main() {{ let secret = std::path::Path::new(r\"{}\"); let _ = std::fs::read(secret); }}\n",
-            secret_path.display()
+            r#"fn main() {{
+    let secret = std::path::Path::new(r"{secret}");
+    if let Ok(contents) = std::fs::read(secret) {{
+        std::fs::write("LEAKED_SECRET.txt", contents).unwrap();
+    }}
+    let _ = std::fs::write(r"{outside}", b"pwned");
+    let _ = std::process::Command::new(r"{attacker}")
+        .args(["write", r"{child_target}"])
+        .status();
+}}
+"#,
+            secret = secret_path.display(),
+            outside = outside_target.display(),
+            attacker = attacker,
+            child_target = child_target.display(),
         ),
     )
     .unwrap();
-    let cargo_sandbox = match Sandbox::builder(&fixture)
+    let cargo_sandbox = match sandbox_for(backend_kind, &fixture)
         .read_only(
             std::env::var_os("CARGO_HOME")
                 .map(PathBuf::from)
@@ -1764,14 +1855,34 @@ fn compatibility_suite(
     };
     let output = sandbox_output(&cargo_sandbox, "cargo", &["build"], &fixture);
     match output {
-        Ok(output) if output.status.success() => {
+        Ok(output)
+            if output.status.success()
+                && !leak_path.exists()
+                && !outside_target.exists()
+                && !child_target.exists() =>
+        {
             compatibility.push(Evidence::pass(
                 "compat.cargo-build",
                 "cargo build malicious fixture",
                 "compatibility",
                 backend,
                 output.status.code(),
-                "build succeeded while secret stayed outside policy",
+                "build succeeded; secret read, outside write, and child escape all stayed blocked",
+            ));
+        }
+        Ok(output) if output.status.success() => {
+            compatibility.push(Evidence::escape(
+                "compat.cargo-build",
+                "cargo build malicious fixture",
+                "compatibility",
+                backend,
+                output.status.code(),
+                format!(
+                    "build succeeded but hostile build.rs leaked: leak={} outside={} child={}",
+                    leak_path.exists(),
+                    outside_target.exists(),
+                    child_target.exists()
+                ),
             ));
         }
         Ok(output) => {
@@ -1797,6 +1908,9 @@ fn compatibility_suite(
             ));
         }
     }
+    let _ = fs::remove_file(&leak_path);
+    let _ = fs::remove_file(&outside_target);
+    let _ = fs::remove_file(&child_target);
     let _ = fs::remove_file(&secret_path);
 }
 
@@ -2010,6 +2124,39 @@ fn process_exists(pid: u32) -> bool {
         CloseHandle(handle);
     }
     active
+}
+
+#[cfg(windows)]
+fn kill_process(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE,
+    };
+    // SAFETY: pid belongs to the control child and the requested access rights
+    // are standard process termination rights.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: The handle is valid and owned by this function.
+    let ok = unsafe { TerminateProcess(handle, 1) };
+    if ok != 0 {
+        unsafe {
+            let _ = WaitForSingleObject(handle, 5000);
+        }
+    }
+    // SAFETY: The handle is closed exactly once after use.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    ok != 0
 }
 
 #[cfg(windows)]

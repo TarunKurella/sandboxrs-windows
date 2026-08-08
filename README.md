@@ -251,7 +251,7 @@ The eval covers:
 - `env_clear()` isolation where the child must still launch with a correctly
   rebuilt environment block (including the real `=C:=<current directory>`
   drive variables for every present logical drive)
-- concurrent sandbox isolation
+- cross-sandbox policy isolation (forced backend on every nested `Sandbox`)
 - a real malicious Rust fixture built through `cargo`
 
 GitHub CI runs the AppContainer suite as a temporary standard user and fails
