@@ -580,19 +580,7 @@ fn build_env_entries(
     // Always include essential Windows variables so sandboxed children can
     // load when the parent environment is cleared.
     if entries.is_empty() {
-        for key in [
-            "SystemRoot",
-            "windir",
-            "ComSpec",
-            "PATHEXT",
-            "TEMP",
-            "TMP",
-            "PATH",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                entries.push((OsString::from(key), value));
-            }
-        }
+        entries.extend(essential_env_entries());
     }
     // Some launch contexts (Start-Process -Environment) remove the hidden
     // drive current-directory variables from the process block entirely, so
@@ -600,6 +588,49 @@ fn build_env_entries(
     // and synthesize the entries from the current directory.
     if env_clear {
         entries.extend(drive_current_dir_entries());
+    }
+    entries
+}
+
+#[cfg(windows)]
+fn essential_env_entries() -> Vec<(OsString, OsString)> {
+    let keys = [
+        "SystemRoot",
+        "windir",
+        "SystemDrive",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "PATH",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "ALLUSERSPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "CommonProgramFiles",
+        "CommonProgramFiles(X86)",
+        "OS",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "PROCESSOR_LEVEL",
+        "PROCESSOR_REVISION",
+        "PUBLIC",
+        "COMPUTERNAME",
+        "USERNAME",
+        "USERDOMAIN",
+        "SESSIONNAME",
+    ];
+    let mut entries = Vec::new();
+    for key in keys {
+        if let Some(value) = std::env::var_os(key) {
+            entries.push((OsString::from(key), value));
+        }
     }
     entries
 }
