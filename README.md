@@ -2,6 +2,25 @@
 
 **No-admin Windows process sandboxing with a `std::process::Command`-like API.**
 
+<p align="center">
+  <a href="https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/windows.yml">
+    <img alt="Windows CI" src="https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/windows.yml/badge.svg">
+  </a>
+  <a href="https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/security-evals.yml">
+    <img alt="Security evals" src="https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/security-evals.yml/badge.svg">
+  </a>
+  <a href="https://crates.io/crates/sandboxrs-windows">
+    <img alt="crates.io" src="https://img.shields.io/badge/crates.io-sandboxrs--windows-blue">
+  </a>
+  <a href="https://opensource.org/licenses/MIT">
+    <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  </a>
+</p>
+
+> Rust · Windows 11 / Windows Server 2025 · AppContainer · Windows Sandbox API ·
+> process isolation · no-admin process sandbox · Job Object · agent sandbox ·
+> untrusted code execution · filesystem ACL · CI security evals
+
 `sandboxrs-windows` is a Rust library that launches Windows child processes
 inside a validated, reusable authority boundary. It prefers Windows' modern
 composable sandbox API when available and falls back to a regular AppContainer
@@ -40,17 +59,9 @@ tools, or workflows.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    A["Rust caller"] --> B["Sandbox::builder(workspace)"]
-    B --> C["FilesystemPlan normalize + validate"]
-    C --> D{"Backend probe"}
-    D -->|"available"| E["Windows Sandbox API"]
-    D -->|"fallback"| F["AppContainer via rappct"]
-    E --> G["Job Object"]
-    F --> G
-    G --> H["child + descendants"]
-```
+<p align="center">
+  <img alt="sandboxrs-windows architecture" src="docs/architecture.svg" width="100%">
+</p>
 
 Backend selection is capability probing, never OS-version guessing:
 
@@ -63,14 +74,14 @@ Backend selection is capability probing, never OS-version guessing:
 5. If neither works, `build()` fails closed. There is no silent
    `std::process::Command` fallback.
 
-```mermaid
-flowchart LR
-    S["Sandbox"] --> C1["command(cargo)"]
-    S --> C2["command(git)"]
-    S --> C3["command(python)"]
-```
-
 One validated `Sandbox` can run many commands without rebuilding policy.
+
+```text
+Sandbox
+  ├── command("cargo")   cargo check / cargo test
+  ├── command("git")     git status / git diff
+  └── command("python")  python script
+```
 
 ## Public API
 
@@ -185,14 +196,9 @@ control succeeds, it becomes a required pass.
 This is an experimental benchmark, not a security certification: the headline
 is "zero escapes and zero invalid tests," not "100% secure."
 
-```mermaid
-pie showData
-title sandboxrs-windows security score
-"Security contract" : 100
-"Path escape" : 100
-"Lifecycle containment" : 100
-"Environment isolation" : 100
-```
+<p align="center">
+  <img alt="Evals V2.1 scoreboard" src="docs/security-score.svg" width="100%">
+</p>
 
 ### What is measured
 
