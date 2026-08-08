@@ -96,7 +96,7 @@ fn main() {
             let mut block = vec![0u8; bytes];
             block[0] = 1;
             block[bytes - 1] = 2;
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            std::thread::sleep(std::time::Duration::from_secs(5));
             std::process::exit(0);
         }
         Some("spawn-many") if args.len() <= 2 => {
@@ -106,7 +106,7 @@ fn main() {
                 children.push(
                     Command::new(std::env::current_exe().unwrap())
                         .arg("sleep")
-                        .arg("30")
+                        .arg("5")
                         .spawn()
                         .unwrap(),
                 );

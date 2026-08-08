@@ -882,6 +882,7 @@ fn reparse_case(
     }
     let target = link.join("pwned.txt");
     if native_succeeds(Command::new(attacker).arg("write").arg(p(&target))) {
+        let _ = fs::remove_file(&target);
         let output = sandbox_output(sandbox, attacker, &["write", p(&target)], workspace);
         match output {
             Ok(output) if !output.status.success() && !target.exists() => {
@@ -1813,6 +1814,7 @@ fn forbidden_case(
         ));
         return;
     }
+    restore_fixture_state(args);
     let output = sandbox_output(sandbox, attacker, args, cwd);
     match output {
         Ok(output) if output.status.success() => {
@@ -1841,7 +1843,11 @@ fn forbidden_case(
                 name,
                 "security",
                 backend,
-                format!("blocked but postcondition invalid: {}", output.status),
+                format!(
+                    "blocked but postcondition invalid: {} stderr={:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ),
             ));
         }
         Err(err) => {
@@ -1853,6 +1859,38 @@ fn forbidden_case(
                 format!("process did not start; attack was not actually attempted: {err}"),
             ));
         }
+    }
+}
+
+#[cfg(windows)]
+fn restore_fixture_state(args: &[&str]) {
+    // The native control intentionally mutates the same path family. Restore
+    // the fixture to its pre-attack state so the sandbox postcondition checks
+    // the sandbox result, not leftover control side effects.
+    match args.first().copied() {
+        Some("write") | Some("link") => {
+            if let Some(path) = args.get(1) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Some("delete") => {
+            if let Some(path) = args.get(1) {
+                if !Path::new(path).exists() {
+                    let _ = fs::write(path, b"x");
+                }
+            }
+        }
+        Some("move") => {
+            if let Some(source) = args.get(1) {
+                if !Path::new(source).exists() {
+                    let _ = fs::write(source, b"x");
+                }
+            }
+            if let Some(destination) = args.get(2) {
+                let _ = fs::remove_file(destination);
+            }
+        }
+        _ => {}
     }
 }
 

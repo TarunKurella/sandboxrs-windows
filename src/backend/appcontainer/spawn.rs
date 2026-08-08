@@ -551,6 +551,13 @@ fn build_env_block(
                 entries.push((OsString::from(key), value));
             }
         }
+        // CreateProcessW also needs drive current-directory variables
+        // ("=C:=C:\\...") when a custom environment block is supplied.
+        for (key, value) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with('=') {
+                entries.push((key, value));
+            }
+        }
     }
     entries.sort_by(|a, b| {
         a.0.to_string_lossy()
