@@ -22,10 +22,15 @@ pub(crate) fn launch_probe() -> Result<(), String> {
     let temp = std::env::temp_dir();
     let workspace = temp.join(format!("{identity}-workspace"));
     let outside = temp.join(format!("{identity}-outside.txt"));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+        .unwrap_or_else(|| temp.clone());
 
     let result = (|| {
         fs::create_dir_all(&workspace).map_err(|err| err.to_string())?;
-        let plan = FilesystemPlan::compile(&workspace, &[], &[]).map_err(|err| err.to_string())?;
+        let plan = FilesystemPlan::compile(&workspace, &[exe_dir.clone()], &[])
+            .map_err(|err| err.to_string())?;
         let appcontainer = build_state(&identity, &plan).map_err(|err| err.to_string())?;
         let sandbox = Sandbox::new(
             workspace.clone(),
@@ -39,8 +44,8 @@ pub(crate) fn launch_probe() -> Result<(), String> {
 
         let mut success = spawn::spawn(
             &sandbox,
-            "cmd".into(),
-            vec!["/c".into(), "exit".into(), "0".into()],
+            exe_dir.join("sandboxrs-test-attacker.exe").into(),
+            vec!["sleep".into(), "1".into()],
             false,
             Default::default(),
             Vec::new(),
@@ -50,9 +55,13 @@ pub(crate) fn launch_probe() -> Result<(), String> {
             Stdio::Piped,
         )
         .map_err(|err| err.to_string())?;
-        let status = success.wait().map_err(|err| err.to_string())?;
-        if !status.success() {
-            return Err(format!("probe launch exited with {status:?}"));
+        let output = success.wait_with_output().map_err(|err| err.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "probe launch exited with {:?}: stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         let mut denied = spawn::spawn(
