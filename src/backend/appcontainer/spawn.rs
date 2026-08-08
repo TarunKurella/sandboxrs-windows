@@ -288,10 +288,20 @@ fn launch(
 
     if result == 0 {
         let error = unsafe { GetLastError() };
+        let env_diag = env_block
+            .map(|block| {
+                let first: Vec<String> = block
+                    .split(|unit| *unit == 0)
+                    .take(6)
+                    .map(|part| String::from_utf16_lossy(part))
+                    .collect();
+                format!("env_len={} first={first:?}", block.len())
+            })
+            .unwrap_or_else(|| "env=none".into());
         return Err(SandboxError::ProcessCreationFailed {
             backend: BackendKind::AppContainer,
             win32_code: Some(error),
-            message: format!("CreateProcessW failed: {error}"),
+            message: format!("CreateProcessW failed: {error} ({env_diag})"),
         });
     }
 

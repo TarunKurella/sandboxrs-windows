@@ -808,6 +808,7 @@ fn reparse_suite(
         backend,
         dir_created,
         false,
+        false,
     );
     reparse_case(
         security,
@@ -820,6 +821,7 @@ fn reparse_suite(
         backend,
         file_created,
         false,
+        true,
     );
     reparse_case(
         security,
@@ -832,6 +834,7 @@ fn reparse_suite(
         backend,
         junction_created,
         true,
+        false,
     );
     reparse_case(
         security,
@@ -844,6 +847,7 @@ fn reparse_suite(
         backend,
         nested_created,
         true,
+        false,
     );
 }
 
@@ -859,6 +863,7 @@ fn reparse_case(
     backend: &str,
     created: bool,
     required: bool,
+    read_mode: bool,
 ) {
     if !created {
         if required {
@@ -876,6 +881,51 @@ fn reparse_case(
                 "reparse",
                 backend,
                 "link creation requires privilege not available in this context",
+            ));
+        }
+        return;
+    }
+    if read_mode {
+        if native_succeeds(Command::new(attacker).arg("read").arg(p(link))) {
+            let output = sandbox_output(sandbox, attacker, &["read", p(link)], workspace);
+            match output {
+                Ok(output) if !output.status.success() => {
+                    security.push(Evidence::pass(
+                        id,
+                        name,
+                        "reparse",
+                        backend,
+                        output.status.code(),
+                        "sandbox blocked read through file symlink",
+                    ));
+                }
+                Ok(output) => {
+                    security.push(Evidence::escape(
+                        id,
+                        name,
+                        "reparse",
+                        backend,
+                        output.status.code(),
+                        "sandbox read through file symlink",
+                    ));
+                }
+                Err(err) => {
+                    security.push(Evidence::error(
+                        id,
+                        name,
+                        "reparse",
+                        backend,
+                        format!("sandbox process did not start: {err}"),
+                    ));
+                }
+            }
+        } else {
+            security.push(Evidence::error(
+                id,
+                name,
+                "reparse",
+                backend,
+                "native read through file symlink failed; fixture is not a real escape vector",
             ));
         }
         return;
@@ -914,7 +964,11 @@ fn reparse_case(
                     name,
                     "reparse",
                     backend,
-                    format!("write denied but postcondition invalid: {}", output.status),
+                    format!(
+                        "write denied but postcondition invalid: {} stderr={:?}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr)
+                    ),
                 ));
             }
             Err(err) => {
@@ -1814,7 +1868,7 @@ fn forbidden_case(
         ));
         return;
     }
-    restore_fixture_state(args);
+    restore_fixture_state(args, cwd);
     let output = sandbox_output(sandbox, attacker, args, cwd);
     match output {
         Ok(output) if output.status.success() => {
@@ -1863,30 +1917,45 @@ fn forbidden_case(
 }
 
 #[cfg(windows)]
-fn restore_fixture_state(args: &[&str]) {
+fn restore_fixture_state(args: &[&str], cwd: &Path) {
     // The native control intentionally mutates the same path family. Restore
     // the fixture to its pre-attack state so the sandbox postcondition checks
     // the sandbox result, not leftover control side effects.
-    match args.first().copied() {
-        Some("write") | Some("link") => {
-            if let Some(path) = args.get(1) {
+    let op = args.first().copied().unwrap_or("");
+    let resolved = |index: usize| -> Option<PathBuf> {
+        let raw = args.get(index)?;
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            Some(path.to_path_buf())
+        } else {
+            Some(cwd.join(path))
+        }
+    };
+    match op {
+        "write" | "spawn-write" | "grandchild-write" | "great-grandchild-write" => {
+            if let Some(path) = resolved(1) {
                 let _ = fs::remove_file(path);
             }
         }
-        Some("delete") => {
-            if let Some(path) = args.get(1) {
-                if !Path::new(path).exists() {
+        "link" => {
+            if let Some(path) = resolved(2) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        "delete" | "spawn-delete" | "grandchild-delete" | "great-grandchild-delete" => {
+            if let Some(path) = resolved(1) {
+                if !path.exists() {
                     let _ = fs::write(path, b"x");
                 }
             }
         }
-        Some("move") => {
-            if let Some(source) = args.get(1) {
-                if !Path::new(source).exists() {
+        "move" | "spawn-move" | "grandchild-move" => {
+            if let Some(source) = resolved(1) {
+                if !source.exists() {
                     let _ = fs::write(source, b"x");
                 }
             }
-            if let Some(destination) = args.get(2) {
+            if let Some(destination) = resolved(2) {
                 let _ = fs::remove_file(destination);
             }
         }
