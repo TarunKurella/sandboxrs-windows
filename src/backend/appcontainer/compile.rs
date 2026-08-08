@@ -12,6 +12,7 @@ use crate::{BackendKind, SandboxError};
 const FILE_GENERIC_READ: u32 = 0x0012_0089;
 const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
+const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 
 #[cfg(windows)]
 pub(crate) fn apply_grants(
@@ -20,7 +21,7 @@ pub(crate) fn apply_grants(
 ) -> Result<(), SandboxError> {
     for rule in plan.rules() {
         let access = match rule.access() {
-            Access::ReadWrite => FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE,
+            Access::ReadWrite => FILE_ALL_ACCESS,
             Access::ReadOnly => FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
             Access::Hidden => continue,
         };

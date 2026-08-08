@@ -467,19 +467,30 @@ fn run_windows_evals() -> EvalReport {
         .stdout(sandboxrs_windows::Stdio::piped())
         .stderr(sandboxrs_windows::Stdio::piped());
     let leaked = env_cleared.output();
-    let leak_blocked = match leaked {
+    match leaked {
         Ok(output) => {
-            !output.status.success()
-                || !String::from_utf8_lossy(&output.stdout).contains("super-secret-value")
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let blocked = !output.status.success() || !stdout.contains("super-secret-value");
+            report.environment.push(Check {
+                name: "env_clear removes secret".into(),
+                expected: "true".into(),
+                actual: format!(
+                    "blocked={blocked} status={} stdout={stdout:?} stderr={stderr:?}",
+                    output.status
+                ),
+                pass: blocked,
+            });
         }
-        Err(_) => false,
-    };
-    report.environment.push(Check {
-        name: "env_clear removes secret".into(),
-        expected: "true".into(),
-        actual: format!("leak_blocked={leak_blocked}"),
-        pass: leak_blocked,
-    });
+        Err(err) => {
+            report.environment.push(Check {
+                name: "env_clear removes secret".into(),
+                expected: "true".into(),
+                actual: format!("error={err}"),
+                pass: false,
+            });
+        }
+    }
 
     let _ = fs::remove_dir_all(&fixture);
     report.totals = Totals {
