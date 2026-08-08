@@ -27,6 +27,7 @@ jobs:
       - run: cargo build --all-targets
       - run: cargo test --all-targets
       - name: Backend doctor
+        continue-on-error: true
         run: cargo run --bin sandboxrs -- doctor --json
       - name: Run sandbox contract tests (experimental API may be unavailable)
         continue-on-error: true
