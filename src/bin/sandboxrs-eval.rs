@@ -1553,13 +1553,16 @@ fn environment_suite(
                     "secret leaked through env_clear",
                 ));
             } else {
+                let cwd = std::env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "unknown".into());
                 security.push(Evidence::pass(
                     "env.clear-secret",
                     "env_clear removes secret",
                     "environment",
                     backend,
                     output.status.code(),
-                    format!("secret absent; stderr={stderr:?}"),
+                    format!("secret absent; cwd={cwd}; stderr={stderr:?}"),
                 ));
             }
         }

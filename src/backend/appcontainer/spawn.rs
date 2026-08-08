@@ -539,6 +539,11 @@ fn build_env_block(
             .to_ascii_uppercase()
             .cmp(&b.0.to_string_lossy().to_ascii_uppercase())
     });
+    entries.dedup_by(|a, b| {
+        a.0.to_string_lossy()
+            .to_ascii_lowercase()
+            .eq(&b.0.to_string_lossy().to_ascii_lowercase())
+    });
     let mut block = Vec::new();
     for (key, value) in entries {
         block.extend(
@@ -589,6 +594,13 @@ fn build_env_entries(
             }
         }
     }
+    // Some launch contexts (Start-Process -Environment) remove the hidden
+    // drive current-directory variables from the process block entirely, so
+    // GetEnvironmentStringsW cannot recover them. Enumerate the real drives
+    // and synthesize the entries from the current directory.
+    if env_clear {
+        entries.extend(drive_current_dir_entries());
+    }
     entries
 }
 
@@ -628,6 +640,42 @@ fn hidden_env_entries() -> Vec<(OsString, OsString)> {
             cursor = end.add(1);
         }
         let _ = FreeEnvironmentStringsW(raw);
+    }
+    entries
+}
+
+#[cfg(windows)]
+fn drive_current_dir_entries() -> Vec<(OsString, OsString)> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    use windows_sys::Win32::System::Environment::GetCurrentDirectoryW;
+
+    let mut entries = Vec::new();
+    let mut current_dir = [0u16; 32768];
+    // SAFETY: `current_dir` is a valid writable buffer and GetCurrentDirectoryW
+    // fills it with a NUL-terminated path.
+    let len = unsafe { GetCurrentDirectoryW(current_dir.len() as u32, current_dir.as_mut_ptr()) };
+    if len == 0 || len as usize >= current_dir.len() {
+        return entries;
+    }
+    let current_dir = String::from_utf16_lossy(&current_dir[..len as usize]);
+    let current_drive = current_dir
+        .chars()
+        .next()
+        .map(|ch| ch.to_ascii_uppercase())
+        .unwrap_or('C');
+
+    // SAFETY: GetLogicalDrives returns a bitmask without side effects.
+    let drives = unsafe { GetLogicalDrives() };
+    for offset in 0..26 {
+        if drives & (1u32 << offset) != 0 {
+            let letter = (b'A' + offset) as char;
+            let value = if letter == current_drive {
+                current_dir.clone()
+            } else {
+                format!("{letter}:\\")
+            };
+            entries.push((OsString::from(format!("={letter}:")), OsString::from(value)));
+        }
     }
     entries
 }
