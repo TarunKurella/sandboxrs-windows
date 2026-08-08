@@ -6,6 +6,7 @@
 #[cfg(windows)]
 pub(crate) fn launch_probe() -> Result<(), String> {
     use std::fs;
+    use std::path::PathBuf;
     use std::time::SystemTime;
 
     use crate::filesystem::FilesystemPlan;
@@ -22,15 +23,20 @@ pub(crate) fn launch_probe() -> Result<(), String> {
     let temp = std::env::temp_dir();
     let workspace = temp.join(format!("{identity}-workspace"));
     let outside = temp.join(format!("{identity}-outside.txt"));
-    let exe_dir = std::env::current_exe()
+    let helper = std::env::var("SANDBOXRS_ATTACKER")
         .ok()
-        .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
-        .unwrap_or_else(|| temp.clone());
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
 
     let result = (|| {
         fs::create_dir_all(&workspace).map_err(|err| err.to_string())?;
-        let plan = FilesystemPlan::compile(&workspace, &[exe_dir.clone()], &[])
-            .map_err(|err| err.to_string())?;
+        let helper = helper
+            .clone()
+            .ok_or_else(|| "no probe helper executable".to_string())?;
+        let helper_copy = workspace.join("sandboxrs-probe-helper.exe");
+        fs::copy(&helper, &helper_copy)
+            .map_err(|err| format!("copy helper into workspace failed: {err}"))?;
+        let plan = FilesystemPlan::compile(&workspace, &[], &[]).map_err(|err| err.to_string())?;
         let appcontainer = build_state(&identity, &plan).map_err(|err| err.to_string())?;
         let sandbox = Sandbox::new(
             workspace.clone(),
@@ -42,18 +48,37 @@ pub(crate) fn launch_probe() -> Result<(), String> {
             Some(appcontainer),
         );
 
-        let mut success = spawn::spawn(
-            &sandbox,
-            exe_dir.join("sandboxrs-test-attacker.exe").into(),
-            vec!["sleep".into(), "1".into()],
-            false,
-            Default::default(),
-            Vec::new(),
-            Some(workspace.clone()),
-            Stdio::Piped,
-            Stdio::Piped,
-            Stdio::Piped,
-        )
+        let attacker_mode = std::env::var("SANDBOXRS_ATTACKER").is_ok();
+        if !attacker_mode {
+            std::env::set_var("SANDBOXRS_PROBE_SELF", "1");
+        }
+        let mut success = if attacker_mode {
+            spawn::spawn(
+                &sandbox,
+                helper_copy.clone().into(),
+                vec!["sleep".into(), "1".into()],
+                false,
+                Default::default(),
+                Vec::new(),
+                Some(workspace.clone()),
+                Stdio::Piped,
+                Stdio::Piped,
+                Stdio::Piped,
+            )
+        } else {
+            spawn::spawn(
+                &sandbox,
+                helper_copy.clone().into(),
+                Vec::new(),
+                false,
+                Default::default(),
+                Vec::new(),
+                Some(workspace.clone()),
+                Stdio::Piped,
+                Stdio::Piped,
+                Stdio::Piped,
+            )
+        }
         .map_err(|err| err.to_string())?;
         let output = success.wait_with_output().map_err(|err| err.to_string())?;
         if !output.status.success() {
@@ -64,28 +89,27 @@ pub(crate) fn launch_probe() -> Result<(), String> {
             ));
         }
 
-        let mut denied = spawn::spawn(
-            &sandbox,
-            "cmd".into(),
-            vec![
-                "/c".into(),
-                format!("type nul > {}", outside.display()).into(),
-            ],
-            false,
-            Default::default(),
-            Vec::new(),
-            Some(workspace.clone()),
-            Stdio::Piped,
-            Stdio::Piped,
-            Stdio::Piped,
-        )
-        .map_err(|err| err.to_string())?;
-        let denied_status = denied.wait().map_err(|err| err.to_string())?;
-        if denied_status.success() || outside.exists() {
-            return Err(format!(
-                "outside-write was not denied (status {denied_status:?}, file existed={})",
-                outside.exists()
-            ));
+        if attacker_mode {
+            let mut denied = spawn::spawn(
+                &sandbox,
+                helper_copy.clone().into(),
+                vec!["write".into(), outside.display().to_string().into()],
+                false,
+                Default::default(),
+                Vec::new(),
+                Some(workspace.clone()),
+                Stdio::Piped,
+                Stdio::Piped,
+                Stdio::Piped,
+            )
+            .map_err(|err| err.to_string())?;
+            let denied_status = denied.wait().map_err(|err| err.to_string())?;
+            if denied_status.success() || outside.exists() {
+                return Err(format!(
+                    "outside-write was not denied (status {denied_status:?}, file existed={})",
+                    outside.exists()
+                ));
+            }
         }
         Ok(())
     })();

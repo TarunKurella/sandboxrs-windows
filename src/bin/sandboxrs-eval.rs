@@ -194,6 +194,10 @@ struct BackendRun {
 }
 
 fn main() {
+    if std::env::var_os("SANDBOXRS_PROBE_SELF").is_some() {
+        println!("probe-ok");
+        return;
+    }
     let mut backend_arg = "all".to_string();
     let mut report_path = None;
     let mut require_standard_user = false;
@@ -260,6 +264,16 @@ fn main() {
 fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalReport {
     use std::fs;
 
+    let attacker = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .map(|dir| dir.join("sandboxrs-test-attacker.exe"))
+        })
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .expect("attacker helper must be built next to the eval binary");
+    std::env::set_var("SANDBOXRS_ATTACKER", &attacker);
+
     let probe = Sandbox::probe();
     let backends: Vec<BackendInfo> = probe
         .entries
@@ -321,15 +335,6 @@ fn run_windows_evals(backend_arg: &str, allow_unsupported: &mut bool) -> EvalRep
     fs::write(readonly.join("readable.txt"), b"readable").unwrap();
     fs::write(secret.join("DO_NOT_READ.txt"), b"top-secret").unwrap();
     fs::write(outside.join("outside.txt"), b"outside").unwrap();
-
-    let attacker = std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.parent()
-                .map(|dir| dir.join("sandboxrs-test-attacker.exe"))
-        })
-        .and_then(|path| path.to_str().map(str::to_owned))
-        .expect("attacker helper must be built next to the eval binary");
 
     for backend in requested {
         let run = run_backend(backend, &workspace, &readonly, &secret, &outside, &attacker);

@@ -23,6 +23,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    if std::env::var_os("SANDBOXRS_PROBE_SELF").is_some() {
+        println!("probe-ok");
+        return ExitCode::SUCCESS;
+    }
     match parse_args(std::env::args().skip(1)) {
         Ok(Command::Doctor { json }) => run_doctor(json),
         Ok(Command::Exec {
