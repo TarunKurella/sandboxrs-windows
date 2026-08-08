@@ -5,6 +5,27 @@ edition = "2021"
 rust-version = "1.90"
 description = "No-admin Windows process sandbox library with a std::process::Command-like API"
 license = "MIT"
+documentation = "https://docs.rs/sandboxrs-windows"
+homepage = "https://github.com/TarunKurella/sandboxrs-windows"
+repository = "https://github.com/TarunKurella/sandboxrs-windows"
+readme = "README.md"
+keywords = [
+  "windows",
+  "sandbox",
+  "appcontainer",
+  "process-isolation",
+  "security",
+]
+categories = ["os::windows-apis", "development-tools::testing", "security"]
+exclude = [
+  ".github/",
+  "evals/results/",
+  "FUTUREPLAN.md",
+  "PLAN.md",
+  "examples/",
+  "schemas/",
+  "tests/",
+]
 
 [lib]
 name = "sandboxrs_windows"
