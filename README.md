@@ -157,14 +157,15 @@ Windows VMs and proves every result twice: first that the operation succeeds
 outside the sandbox, then that the sandbox contains it. Reports are uploaded
 as CI artifacts and stored in [`evals/results`](evals/results).
 
-### Measured 2026-08-08 (Evals V2, standard user)
+### Measured 2026-08-08 (Evals V2.1, standard user)
 
 | Suite | Windows Server 2025 (26100) | Windows 11 ARM64 (26200) |
 |---|---|---|
 | Backend selected | AppContainer | AppContainer |
-| Security evidence PASS | 44 / 44 | 44 / 44 |
+| Security evidence PASS | 43 | 43 |
 | Security ESCAPE | 0 | 0 |
 | Security ERROR (invalid test) | 0 | 0 |
+| Security UNSUPPORTED | 1 | 1 |
 | Developer compatibility | 1 / 5 | 2 / 5 |
 | Privilege | standard user | standard user |
 
@@ -172,8 +173,14 @@ Every security case in Evals V2 records four-state evidence
 (`pass` / `escape` / `error` / `unsupported`), requires a native control proving
 the attack is possible outside the sandbox, restores fixture state after the
 control, and verifies filesystem postconditions. The measured result is
-**44 / 44 pass, 0 escapes, 0 invalid tests** on both runners under a real
+**43 pass, 0 escapes, 0 invalid tests** on both runners under a real
 standard Windows user.
+
+The single `unsupported` case is `job.breakaway`: GitHub's hosted runners
+themselves run inside a Job Object that already denies
+`CREATE_BREAKAWAY_FROM_JOB` natively, so that mode is reported as unavailable
+rather than credited to the sandbox. On a Windows 11 VDI where the native
+control succeeds, it becomes a required pass.
 
 This is an experimental benchmark, not a security certification: the headline
 is "zero escapes and zero invalid tests," not "100% secure."
@@ -253,6 +260,21 @@ The eval covers:
   drive variables for every present logical drive)
 - cross-sandbox policy isolation (forced backend on every nested `Sandbox`)
 - a real malicious Rust fixture built through `cargo`
+
+Evals V2.1 additionally:
+
+- fails when a required backend is unavailable unless `--allow-unsupported`
+  was explicitly passed (observed results never mutate that flag)
+- forces the evaluated backend into every nested `Sandbox` through one
+  `sandbox_for()` helper, so resource, cross-sandbox, and Cargo suites cannot
+  silently fall back to Auto
+- makes the hostile `build.rs` actively leak a `LEAKED_SECRET.txt`, attempt an
+  outside write, and spawn a child outside write; a Cargo build only passes
+  compatibility when all three remain blocked
+- proves breakaway/detached/suspended child creation works natively before the
+  sandboxed run, and marks host-blocked modes `unsupported`
+- runs the inherited-handle test from the workspace cwd so only handle
+  inheritance is under test
 
 GitHub CI runs the AppContainer suite as a temporary standard user and fails
 if the eval reports `admin: true`, making the no-admin claim testable.
