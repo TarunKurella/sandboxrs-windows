@@ -530,54 +530,9 @@ fn build_env_block(
     envs: &BTreeMap<OsString, OsString>,
     removals: &[OsString],
 ) -> Option<Vec<u16>> {
-    let mut entries: Vec<(OsString, OsString)> = if env_clear {
-        Vec::new()
-    } else {
-        std::env::vars_os().collect()
-    };
-    for removal in removals {
-        let removed = removal.to_string_lossy().to_uppercase();
-        entries.retain(|(key, _)| key.to_string_lossy().to_uppercase() != removed);
-    }
-    for (key, value) in envs {
-        let upper = key.to_string_lossy().to_uppercase();
-        entries.retain(|(existing, _)| existing.to_string_lossy().to_uppercase() != upper);
-        entries.push((key.clone(), value.clone()));
-    }
-    // An empty custom environment makes CreateProcessW fail with error 203
-    // ("environment could not be set") on current Windows builds. Always
-    // include essential Windows variables so sandboxed children can load.
+    let mut entries = build_env_entries(env_clear, envs, removals);
     if entries.is_empty() {
-        for key in [
-            "SystemRoot",
-            "windir",
-            "ComSpec",
-            "PATHEXT",
-            "TEMP",
-            "TMP",
-            "PATH",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                entries.push((OsString::from(key), value));
-            }
-        }
-        // CreateProcessW also needs drive current-directory variables
-        // ("=C:=C:\\...") when a custom environment block is supplied. They are
-        // hidden from std::env in some launch contexts, so synthesize them.
-        for (key, value) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with('=') {
-                entries.push((key, value));
-            }
-        }
-        let mut drives = vec![OsString::from("C:")];
-        if let Some(system_drive) = std::env::var_os("SystemDrive") {
-            drives.push(system_drive);
-        }
-        for drive in drives {
-            let key = OsString::from(format!("={}", drive.to_string_lossy()));
-            let value = OsString::from(format!("{}\\", drive.to_string_lossy()));
-            entries.push((key, value));
-        }
+        return None;
     }
     entries.sort_by(|a, b| {
         a.0.to_string_lossy()
@@ -593,4 +548,86 @@ fn build_env_block(
     }
     block.push(0);
     Some(block)
+}
+
+fn build_env_entries(
+    env_clear: bool,
+    envs: &BTreeMap<OsString, OsString>,
+    removals: &[OsString],
+) -> Vec<(OsString, OsString)> {
+    let mut entries: Vec<(OsString, OsString)> = if env_clear {
+        // A cleared environment still needs the parent's hidden drive
+        // current-directory variables; CreateProcessW fails with error 203
+        // when they are missing from a custom block.
+        hidden_env_entries()
+    } else {
+        std::env::vars_os().collect()
+    };
+    for removal in removals {
+        let removed = removal.to_string_lossy().to_uppercase();
+        entries.retain(|(key, _)| key.to_string_lossy().to_uppercase() != removed);
+    }
+    for (key, value) in envs {
+        let upper = key.to_string_lossy().to_uppercase();
+        entries.retain(|(existing, _)| existing.to_string_lossy().to_uppercase() != upper);
+        entries.push((key.clone(), value.clone()));
+    }
+    // Always include essential Windows variables so sandboxed children can
+    // load when the parent environment is cleared.
+    if entries.is_empty() {
+        for key in [
+            "SystemRoot",
+            "windir",
+            "ComSpec",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "PATH",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                entries.push((OsString::from(key), value));
+            }
+        }
+    }
+    entries
+}
+
+#[cfg(windows)]
+fn hidden_env_entries() -> Vec<(OsString, OsString)> {
+    use windows_sys::Win32::System::Environment::{
+        FreeEnvironmentStringsW, GetEnvironmentStringsW,
+    };
+
+    let mut entries = Vec::new();
+    // SAFETY: GetEnvironmentStringsW returns a read-only double-null-terminated
+    // block owned by the caller until FreeEnvironmentStringsW is called.
+    let raw = unsafe { GetEnvironmentStringsW() };
+    if raw.is_null() {
+        return entries;
+    }
+    let mut cursor = raw;
+    // SAFETY: `cursor` walks the returned NUL-separated block and never reads
+    // past its terminating double NUL.
+    unsafe {
+        loop {
+            let mut end = cursor;
+            while *end != 0 {
+                end = end.add(1);
+            }
+            if end == cursor {
+                break;
+            }
+            let len = end.offset_from(cursor) as usize;
+            let slice = std::slice::from_raw_parts(cursor, len);
+            let entry = String::from_utf16_lossy(slice);
+            if entry.starts_with('=') {
+                if let Some((key, value)) = entry.split_once('=') {
+                    entries.push((OsString::from(key), OsString::from(value)));
+                }
+            }
+            cursor = end.add(1);
+        }
+        let _ = FreeEnvironmentStringsW(raw);
+    }
+    entries
 }
