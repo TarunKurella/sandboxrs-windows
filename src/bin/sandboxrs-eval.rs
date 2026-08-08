@@ -798,6 +798,7 @@ fn reparse_suite(
         &dir_link,
         backend,
         dir_created,
+        false,
     );
     reparse_case(
         security,
@@ -809,6 +810,7 @@ fn reparse_suite(
         &file_link,
         backend,
         file_created,
+        false,
     );
     reparse_case(
         security,
@@ -820,6 +822,7 @@ fn reparse_suite(
         &junction,
         backend,
         junction_created,
+        true,
     );
     reparse_case(
         security,
@@ -831,6 +834,7 @@ fn reparse_suite(
         &nested_junction,
         backend,
         nested_created,
+        true,
     );
 }
 
@@ -845,15 +849,26 @@ fn reparse_case(
     link: &Path,
     backend: &str,
     created: bool,
+    required: bool,
 ) {
     if !created {
-        security.push(Evidence::error(
-            id,
-            name,
-            "reparse",
-            backend,
-            "link fixture could not be created",
-        ));
+        if required {
+            security.push(Evidence::error(
+                id,
+                name,
+                "reparse",
+                backend,
+                "link fixture could not be created",
+            ));
+        } else {
+            security.push(Evidence::unsupported(
+                id,
+                name,
+                "reparse",
+                backend,
+                "link creation requires privilege not available in this context",
+            ));
+        }
         return;
     }
     let target = link.join("pwned.txt");
