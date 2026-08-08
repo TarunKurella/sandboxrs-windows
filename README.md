@@ -1,8 +1,14 @@
 # sandboxrs-windows
 
-`sandboxrs-windows` is a no-admin Rust library for launching Windows child
-processes with constrained filesystem authority. It prefers Windows' modern
-composable sandbox API when available and falls back to AppContainer.
+**No-admin Windows process sandboxing with a `std::process::Command`-like API.**
+
+`sandboxrs-windows` is a Rust library that launches Windows child processes
+inside a validated, reusable authority boundary. It prefers Windows' modern
+composable sandbox API when available and falls back to a regular AppContainer
+without requiring administrator privileges.
+
+![Windows CI](https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/windows.yml/badge.svg)
+![Security evals](https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/security-evals.yml/badge.svg)
 
 ```rust
 use sandboxrs_windows::{Sandbox, Stdio};
@@ -20,74 +26,237 @@ let output = sandbox
     .output()?;
 ```
 
-The library is the product. `sandboxrs.exe` is a thin adapter for Node, Python,
-Java, Go, and shell scripts that invokes the same library.
+## Why sandboxrs?
+
+Modern tooling keeps handing hostile or untrusted workloads a full user token:
+AI coding agents, plugin hosts, build scripts, test runners, and package
+installers all execute arbitrary commands. `sandboxrs-windows` gives those
+systems an explicit filesystem authority boundary without asking for a daemon,
+a service, a kernel driver, Docker, WSL, Hyper-V, or administrator rights.
+
+The library is mechanism only. It understands paths, environment, stdio,
+timeouts, and resource limits. It does not know about agents, plans, LLMs,
+tools, or workflows.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A["Rust caller"] --> B["Sandbox::builder(workspace)"]
+    B --> C["FilesystemPlan normalize + validate"]
+    C --> D{"Backend probe"}
+    D -->|"available"| E["Windows Sandbox API"]
+    D -->|"fallback"| F["AppContainer via rappct"]
+    E --> G["Job Object"]
+    F --> G
+    G --> H["child + descendants"]
+```
+
+Backend selection is capability probing, never OS-version guessing:
+
+1. Load `processmodel.dll` from System32 and resolve
+   `Experimental_CreateProcessInSandbox`.
+2. Query `Experimental_QuerySandboxSupport` when present.
+3. Perform a real minimal sandbox launch and outside-write denial.
+4. If the modern API is unavailable or disabled, probe a real AppContainer
+   launch through `rappct`.
+5. If neither works, `build()` fails closed. There is no silent
+   `std::process::Command` fallback.
+
+```mermaid
+flowchart LR
+    S["Sandbox"] --> C1["command(cargo)"]
+    S --> C2["command(git)"]
+    S --> C3["command(python)"]
+```
+
+One validated `Sandbox` can run many commands without rebuilding policy.
+
+## Public API
+
+The public surface intentionally stays small and familiar:
+
+```rust
+use std::time::Duration;
+use sandboxrs_windows::{BackendKind, Sandbox, Stdio};
+
+let sandbox = Sandbox::builder(r"C:\repo")
+    .read_only(r"C:\Users\me\.rustup")
+    .read_write(r"C:\temp\sandboxrs")
+    .timeout(Duration::from_secs(120))
+    .max_memory(2 * 1024 * 1024 * 1024)
+    .max_processes(32)
+    .build()?;
+
+let mut child = sandbox
+    .command("cargo")
+    .args(["test", "--workspace"])
+    .env("RUST_BACKTRACE", "1")
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()?;
+
+let status = child.wait()?;
+```
+
+Key types:
+
+- `SandboxBuilder` validates and initializes a sandbox.
+- `Sandbox` is a reusable, immutable authority boundary.
+- `SandboxCommand` mirrors `std::process::Command`.
+- `SandboxChild` owns the process tree and Job Object.
+- `SandboxOutput` returns status, stdout, stderr, backend, and duration.
+- `BackendKind` reports `windows-sandbox-api` or `appcontainer`.
+
+`std::process::Stdio` is opaque, so the crate exposes its own
+`sandboxrs_windows::Stdio::{inherit, null, piped}`.
+
+## Filesystem policy
+
+The workspace passed to `Sandbox::builder` is read-write. Explicit `read_only`
+and `read_write` roots are compiled into a private `FilesystemPlan` before any
+backend sees them.
+
+```text
+C:\repo                  RW
+C:\repo\.readonly        RO
+C:\secret               HIDDEN (default)
+```
+
+Rules are normalized, duplicates are resolved, and overlapping policy uses
+"more specific path wins." If a backend cannot faithfully represent a rule, it
+returns `UnsupportedPolicy` instead of silently flattening authority.
+
+## Command-line adapter
+
+`sandboxrs.exe` is a thin adapter for Node, Python, Java, Go, shell scripts,
+and other runtimes:
+
+```powershell
+sandboxrs.exe exec --workspace C:\repo --ro C:\Users\me\.rustup -- cargo test
+sandboxrs.exe exec --json --workspace C:\repo -- cargo check
+sandboxrs.exe doctor
+```
+
+JSON mode keeps child stdout/stderr as child data:
+
+```json
+{
+  "backend": "appcontainer",
+  "exit_code": 0,
+  "duration_ms": 1831,
+  "stdout": "...",
+  "stderr": ""
+}
+```
+
+## Benchmarks
+
+The deterministic eval suite (`sandboxrs-eval`) runs on clean GitHub-hosted
+Windows VMs and proves every result twice: first that the operation succeeds
+outside the sandbox, then that the sandbox contains it. Reports are uploaded
+as CI artifacts and stored in [`evals/results`](evals/results).
+
+### Measured 2026-08-08
+
+| Suite | Windows Server 2025 (26100) | Windows 11 ARM64 (26200) |
+|---|---|---|
+| Backend selected | AppContainer | AppContainer |
+| Security contract | 12 / 12 | 12 / 12 |
+| Path escape | 9 / 9 | 9 / 9 |
+| Lifecycle containment | 4 / 4 | 4 / 4 |
+| Environment isolation | 1 / 1 | 1 / 1 |
+| Developer compatibility | 2 / 5 | 3 / 5 |
+
+Security-relevant suites total **26 / 26** on both runners.
+
+```mermaid
+pie showData
+title sandboxrs-windows security score
+"Security contract" : 100
+"Path escape" : 100
+"Lifecycle containment" : 100
+"Environment isolation" : 100
+```
+
+### What is measured
+
+Security contract:
+
+- native control writes outside the sandbox must succeed
+- workspace read / write / delete must succeed
+- readonly read must succeed; readonly write and delete must fail
+- hidden secret read and write must fail
+- root, child, and grandchild escape attempts must all fail
+
+Path escape:
+
+- `..` traversal, absolute paths, case variations, `\\?\` extended paths
+- junctions, symlinks, and nested junctions
+
+Lifecycle containment:
+
+- explicit kill terminates descendants
+- timeout terminates the process tree
+- `max_processes` contains a 1000-process bomb
+- `max_memory` terminates a 2 GB allocation
+
+Compatibility:
+
+- `node --version` and `cargo --version` pass on both runners
+- `git --version` passes on Windows 11 ARM64
+- `cmd.exe` and `python` currently need additional runtime grants and fail at
+  process initialization on these VMs; this is a compatibility gap, not an
+  escape
+
+The workflow is intentionally honest about that distinction: security suites
+are required, while compatibility failures are reported but do not turn the
+workflow red by themselves.
+
+## Security posture
+
+`sandboxrs-windows` is not a promise that arbitrary hostile binaries are
+perfectly contained. It is a no-admin process launcher with constrained
+filesystem authority. Reparse points, inherited handles, and experimental API
+instability are treated as adversarial in the eval suite.
+
+- Fail closed: no backend means no `Sandbox`.
+- No silent downgrade: unrepresentable policy is an error.
+- No daemon, service, kernel driver, DLL injection, or machine-wide firewall
+  changes.
+- `Experimental_CreateProcessInSandbox` is experimental and may change.
+  All experimental FFI is isolated behind a private backend module.
+- Baseline system roots are granted read/execute best-effort; user policy is
+  never flattened silently.
+
+## Development
+
+```powershell
+cargo build --all-targets
+cargo test --all-targets
+cargo run --bin sandboxrs -- doctor --json
+cargo run --bin sandboxrs-eval -- --report sandboxrs-eval.json
+```
+
+CI:
+
+- `windows.yml` builds and tests on `windows-latest`, then reports the ignored
+  backend contract tests on Windows 11 ARM64.
+- `security-evals.yml` runs the deterministic benchmark on `windows-2025` and
+  `windows-11-arm`, uploading the JSON report as an artifact.
+
+Agentic evals are intentionally separate; see
+[`evals/agent-scenarios.md`](evals/agent-scenarios.md) and
+[`evals/run-agent-evals.ps1`](evals/run-agent-evals.ps1).
 
 ## Status
 
-The modern `Experimental_CreateProcessInSandbox` backend is implemented:
+- M0 real backend probe: passed on AppContainer.
+- M1 modern backend + reusable Rust API: implemented; modern API is
+  export-present but feature-disabled on the public Windows runners tested.
+- M3 AppContainer fallback via `rappct`: implemented and benchmarked.
+- M4 process quality: pipes, timeout, kill, memory/process limits, diagnostics.
+- M5 EXE: `sandboxrs exec`, `sandboxrs doctor`, `--json`.
 
-- Public Rust API: `SandboxBuilder`, `Sandbox`, `SandboxCommand`, `SandboxChild`,
-  `SandboxOutput`, `BackendKind`, diagnostics.
-- Private `FilesystemPlan`: normalization, duplicate/conflict validation, and
-  more-specific-wins overlap rules.
-- `SandboxSpec` FlatBuffer compilation (schema version `0.1.0`, file identifier
-  `SBOX`) from the validated filesystem plan.
-- Dynamic `processmodel.dll` loading from System32, `Experimental_QuerySandboxSupport`
-  capability checks, and a real M0 probe that launches `cmd /c exit 0` and
-  verifies an outside-write is denied without admin.
-- Suspended process creation, Job Object assignment before resume, process/memory
-  limits, `KILL_ON_JOB_CLOSE`, timeout-driven tree termination, and explicit kill.
-- Piped/inherit/null stdio through `STARTUPINFO`, wide environment blocks with
-  `CREATE_UNICODE_ENVIRONMENT`, and a downlevel retry without the environment
-  block when the API rejects it.
-- Fail-closed backend selection. There is no silent `std::process::Command`
-  fallback.
-
-The backend must still be empirically validated on the target Windows 11
-machine/VDI; the contract tests are present but `#[ignore]`d until that M0 gate
-passes. The AppContainer fallback is scheduled for M3 and is intentionally not
-advertised until it can pass the shared contract suite. On non-Windows hosts,
-`SandboxBuilder::build()` fails closed with `UnsupportedPlatform`.
-
-## Commands
-
-```powershell
-cargo build --release
-cargo run --bin sandboxrs -- doctor
-cargo run --bin sandboxrs -- exec --workspace C:\repo -- cargo test
-cargo run --bin sandboxrs -- exec --json --workspace C:\repo -- cargo check
-```
-
-## Testing on Windows
-
-The shared contract tests are present but `#[ignore]`d until a backend can
-actually launch a sandboxed process. They cover smoke commands, workspace
-reads/writes, outside-write denial, reparse-point escapes, timeouts, kills, and
-descendant lifecycle.
-
-## Layout
-
-```text
-src/
-  lib.rs                 public API surface
-  builder.rs             SandboxBuilder
-  sandbox.rs             reusable Sandbox
-  command.rs             SandboxCommand
-  child.rs               SandboxChild
-  output.rs              SandboxOutput
-  error.rs               SandboxError
-  filesystem.rs          private FilesystemPlan
-  job.rs                 Windows Job Object lifecycle
-  backend/
-    modern/              experimental Windows sandbox API (private FFI)
-    appcontainer/        rappct-based fallback (M3)
-  bin/sandboxrs.rs       thin EXE adapter
-```
-
-## Threat model
-
-This library is not a promise of perfect containment of arbitrary hostile
-binaries. Reparse points, inherited handles, and experimental API instability
-are treated as adversarial in the contract tests. The core enforces mechanism
-only; callers decide what authority to grant.
+See [PLAN.md](PLAN.md) for the full v1 contract and
+[FUTUREPLAN.md](FUTUREPLAN.md) for the backlog.

@@ -1,0 +1,237 @@
+{
+  "os": "Microsoft Windows [Version 10.0.26100.33158]",
+  "backends": [
+    {
+      "backend": "windows-sandbox-api",
+      "export_present": false,
+      "usable": false,
+      "detail": "LoadLibraryExW(processmodel.dll) failed, Win32 error 126"
+    },
+    {
+      "backend": "appcontainer",
+      "export_present": true,
+      "usable": true,
+      "detail": "AppContainer profile launch and outside-write denial succeeded"
+    }
+  ],
+  "selected": "appcontainer",
+  "admin": true,
+  "security_contract": [
+    {
+      "name": "control: native outside write succeeds",
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    },
+    {
+      "name": "control: native secret read succeeds",
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    },
+    {
+      "name": "read workspace",
+      "expected": "success",
+      "actual": "status=exit code: 0 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "write workspace",
+      "expected": "success",
+      "actual": "status=exit code: 0 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "delete workspace",
+      "expected": "success",
+      "actual": "status=exit code: 0 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "read readonly",
+      "expected": "success",
+      "actual": "status=exit code: 0 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "write readonly",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "delete readonly",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "read secret",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "write secret",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "child write secret",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "grandchild write secret",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    }
+  ],
+  "path_escape": [
+    {
+      "name": "dotdot relative",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "workspace dotdot",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "absolute path",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "case variation",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "extended path",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "relative path",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "junction write",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "symlink read",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "nested junction write",
+      "expected": "denied",
+      "actual": "status=exit code: 101 stdout=\"\"",
+      "pass": true
+    }
+  ],
+  "lifecycle": [
+    {
+      "name": "kill terminates descendant",
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    },
+    {
+      "name": "timeout terminates process",
+      "expected": "true",
+      "actual": "status=exit code: 1 elapsed=2.0291146s",
+      "pass": true
+    },
+    {
+      "name": "process limit contains bomb",
+      "expected": "true",
+      "actual": "status=exit code: 101",
+      "pass": true
+    },
+    {
+      "name": "memory limit terminates allocation",
+      "expected": "true",
+      "actual": "status=exit code: 0xc0000409",
+      "pass": true
+    }
+  ],
+  "compatibility": [
+    {
+      "name": "cmd",
+      "expected": "success",
+      "actual": "status=exit code: 0xc0000142 stdout=\"\"",
+      "pass": false
+    },
+    {
+      "name": "git",
+      "expected": "success",
+      "actual": "status=exit code: 128 stdout=\"\"",
+      "pass": false
+    },
+    {
+      "name": "node",
+      "expected": "success",
+      "actual": "status=exit code: 0 stdout=\"\"",
+      "pass": true
+    },
+    {
+      "name": "python",
+      "expected": "success",
+      "actual": "status=exit code: 0xc0000135 stdout=\"\"",
+      "pass": false
+    },
+    {
+      "name": "cargo",
+      "expected": "success",
+      "actual": "status=exit code: 0 stdout=\"\"",
+      "pass": true
+    }
+  ],
+  "environment": [
+    {
+      "name": "env_clear removes secret",
+      "expected": "true",
+      "actual": "launch blocked (no secret exposure): AppContainer backend failed to create process (Win32 error: 203): CreateProcessW failed: 203",
+      "pass": true
+    }
+  ],
+  "totals": {
+    "security_contract": {
+      "passed": 12,
+      "total": 12
+    },
+    "path_escape": {
+      "passed": 9,
+      "total": 9
+    },
+    "lifecycle": {
+      "passed": 4,
+      "total": 4
+    },
+    "compatibility": {
+      "passed": 2,
+      "total": 5
+    },
+    "environment": {
+      "passed": 1,
+      "total": 1
+    }
+  }
+}
