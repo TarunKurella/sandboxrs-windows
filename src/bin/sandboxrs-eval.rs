@@ -471,7 +471,7 @@ fn run_windows_evals() -> EvalReport {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let blocked = !output.status.success() || !stdout.contains("super-secret-value");
+            let blocked = !stdout.contains("super-secret-value");
             report.environment.push(Check {
                 name: "env_clear removes secret".into(),
                 expected: "true".into(),

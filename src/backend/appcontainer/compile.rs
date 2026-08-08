@@ -39,7 +39,14 @@ pub(crate) fn apply_grants(
 #[cfg(windows)]
 fn apply_baseline_readonly(profile: &rappct::AppContainerProfile) {
     let read_execute = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
-    for env in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)"] {
+    for env in [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "CommonProgramFiles",
+        "CommonProgramFiles(x86)",
+        "LOCALAPPDATA",
+    ] {
         if let Some(value) = std::env::var_os(env) {
             let path = Path::new(&value);
             let _ = grant_recursive(path, profile, read_execute);

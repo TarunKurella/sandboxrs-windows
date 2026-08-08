@@ -534,8 +534,23 @@ fn build_env_block(
         entries.retain(|(existing, _)| existing.to_string_lossy().to_uppercase() != upper);
         entries.push((key.clone(), value.clone()));
     }
-    if entries.is_empty() && !env_clear && envs.is_empty() && removals.is_empty() {
-        return None;
+    // An empty custom environment makes CreateProcessW fail with error 203
+    // ("environment could not be set") on current Windows builds. Always
+    // include essential Windows variables so sandboxed children can load.
+    if entries.is_empty() {
+        for key in [
+            "SystemRoot",
+            "windir",
+            "ComSpec",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "PATH",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                entries.push((OsString::from(key), value));
+            }
+        }
     }
     entries.sort_by(|a, b| {
         a.0.to_string_lossy()
