@@ -240,9 +240,8 @@ fn main() {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(path, json);
-    } else {
-        println!("{json}");
     }
+    println!("{json}");
 
     if require_standard_user && report.admin {
         eprintln!("eval ran elevated; standard-user requirement failed");

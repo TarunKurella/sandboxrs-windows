@@ -40,8 +40,8 @@ jobs:
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           Get-Content $stdout -ErrorAction SilentlyContinue
           Get-Content $stderr -ErrorAction SilentlyContinue
+          Copy-Item $report "$PWD\sandboxrs-eval.json" -Force -ErrorAction SilentlyContinue
           if ($result.ExitCode -ne 0) { exit $result.ExitCode }
-          Copy-Item $report "$PWD\sandboxrs-eval.json" -Force
       - uses: actions/upload-artifact@v4
         if: always()
         with:
