@@ -28,7 +28,7 @@ jobs:
       - run: cargo test --all-targets
       - name: Backend doctor
         continue-on-error: true
-        run: cargo run --bin sandboxrs -- doctor --json
+        run: $env:RAPPCT_DEBUG_LAUNCH="1"; cargo run --bin sandboxrs -- doctor --json
       - name: Run sandbox contract tests (experimental API may be unavailable)
         continue-on-error: true
         run: cargo test --all-targets -- --ignored --nocapture

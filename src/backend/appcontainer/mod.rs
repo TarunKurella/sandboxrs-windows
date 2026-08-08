@@ -61,7 +61,7 @@ fn build_probe() -> ProbeOutcome {
         Err(err) => ProbeOutcome {
             export_present: false,
             usable: false,
-            detail: format!("AppContainer probe failed: {err}"),
+            detail: format!("AppContainer probe failed: {err:?}"),
         },
     }
 }

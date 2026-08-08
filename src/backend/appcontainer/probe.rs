@@ -3,13 +3,14 @@
 #[cfg(windows)]
 pub(crate) fn launch_probe() -> Result<(), String> {
     use std::fs;
-    use std::path::PathBuf;
     use std::time::SystemTime;
 
     use rappct::launch::{JobLimits, LaunchOptions, StdioConfig};
     use rappct::{launch_in_container_with_io, SecurityCapabilitiesBuilder};
 
     use crate::filesystem::FilesystemPlan;
+
+    std::env::set_var("RAPPCT_DEBUG_LAUNCH", "1");
 
     let nonce = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
