@@ -81,18 +81,32 @@ pub(crate) fn spawn(
 ) -> Result<SandboxChild, SandboxError> {
     #[cfg(windows)]
     {
-        modern::spawn::spawn(
-            sandbox,
-            program,
-            args,
-            env_clear,
-            envs,
-            removals,
-            current_dir,
-            stdin,
-            stdout,
-            stderr,
-        )
+        match sandbox.backend() {
+            BackendKind::WindowsSandboxApi => modern::spawn::spawn(
+                sandbox,
+                program,
+                args,
+                env_clear,
+                envs,
+                removals,
+                current_dir,
+                stdin,
+                stdout,
+                stderr,
+            ),
+            BackendKind::AppContainer => appcontainer::spawn::spawn(
+                sandbox,
+                program,
+                args,
+                env_clear,
+                envs,
+                removals,
+                current_dir,
+                stdin,
+                stdout,
+                stderr,
+            ),
+        }
     }
     #[cfg(not(windows))]
     {

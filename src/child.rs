@@ -26,6 +26,11 @@ pub struct SandboxChild {
     #[cfg(windows)]
     job: Option<crate::job::Job>,
     #[cfg(windows)]
+    #[allow(dead_code)]
+    job_guard: Option<rappct::launch::JobGuard>,
+    #[cfg(windows)]
+    tree_handle: Option<windows_sys::Win32::Foundation::HANDLE>,
+    #[cfg(windows)]
     pub stdin: Option<SandboxChildStdin>,
     #[cfg(windows)]
     pub stdout: Option<SandboxChildStdout>,
@@ -57,6 +62,36 @@ impl SandboxChild {
             thread: Some(thread),
             pid,
             job: Some(job),
+            job_guard: None,
+            tree_handle: None,
+            stdin: stdin.map(SandboxChildStdin),
+            stdout: stdout.map(SandboxChildStdout),
+            stderr: stderr.map(SandboxChildStderr),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn new_appcontainer(
+        backend: BackendKind,
+        pid: u32,
+        process: windows_sys::Win32::Foundation::HANDLE,
+        job_guard: Option<rappct::launch::JobGuard>,
+        stdin: Option<File>,
+        stdout: Option<File>,
+        stderr: Option<File>,
+        timeout: Option<Duration>,
+    ) -> Self {
+        let tree_handle = job_guard.as_ref().map(|job| job.as_handle().0);
+        Self {
+            backend,
+            started: Instant::now(),
+            timeout,
+            process: Some(process),
+            thread: None,
+            pid,
+            job: None,
+            job_guard,
+            tree_handle,
             stdin: stdin.map(SandboxChildStdin),
             stdout: stdout.map(SandboxChildStdout),
             stderr: stderr.map(SandboxChildStderr),
@@ -202,6 +237,16 @@ impl SandboxChild {
             let _ = job.terminate();
             return Ok(());
         }
+        if let Some(handle) = self.tree_handle {
+            // SAFETY: `handle` is the Job Object created by rappct and kept
+            // alive by `job_guard` for the lifetime of this child.
+            let ok =
+                unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(handle, 1) };
+            if ok == 0 {
+                return Err(SandboxError::Io(std::io::Error::last_os_error()));
+            }
+            return Ok(());
+        }
         let process = self.process.ok_or(no_child())?;
         // SAFETY: `process` is a live handle owned by this child.
         let ok = unsafe { windows_sys::Win32::System::Threading::TerminateProcess(process, 1) };
@@ -238,6 +283,12 @@ impl Drop for SandboxChild {
         // belt-and-braces for hosts where that flag was not applied.
         if let Some(job) = &self.job {
             let _ = job.terminate();
+        }
+        if let Some(handle) = self.tree_handle {
+            // SAFETY: Same job handle ownership as `terminate_tree`.
+            unsafe {
+                let _ = windows_sys::Win32::System::JobObjects::TerminateJobObject(handle, 1);
+            }
         }
         if let Some(process) = self.process.take() {
             // SAFETY: The child owns this handle and no longer needs it.

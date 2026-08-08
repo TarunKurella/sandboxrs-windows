@@ -12,7 +12,13 @@ mod timeout_tests {
     #[ignore = "requires a working Windows backend (M0/M1)"]
     fn timeout_terminates_tree() {
         let workspace = common::fresh_workspace("timeout-tree");
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let sandbox = Sandbox::builder(&workspace)
+            .read_only(exe_dir)
             .timeout(Duration::from_millis(500))
             .build()
             .expect("sandbox should build");

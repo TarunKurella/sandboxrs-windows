@@ -25,7 +25,13 @@ pub fn fresh_workspace(name: &str) -> PathBuf {
 }
 
 pub fn workspace_sandbox(workspace: &std::path::Path) -> sandboxrs_windows::Sandbox {
+    let exe_dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     Sandbox::builder(workspace)
+        .read_only(exe_dir)
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .expect("sandbox should build")

@@ -233,12 +233,8 @@ mod tests {
 
     #[test]
     fn more_specific_rule_wins() {
-        let plan = FilesystemPlan::compile(
-            &abs("/workspace"),
-            &[abs("/workspace/.readonly")],
-            &[],
-        )
-        .unwrap();
+        let plan = FilesystemPlan::compile(&abs("/workspace"), &[abs("/workspace/.readonly")], &[])
+            .unwrap();
 
         assert!(plan.access_for(&abs("/workspace/file.txt")).is_writable());
         assert!(!plan

@@ -20,6 +20,8 @@ pub struct Sandbox {
     identity: String,
     limits: ResourceLimits,
     timeout: Option<Duration>,
+    #[cfg(windows)]
+    appcontainer: Option<crate::backend::appcontainer::AppContainerSandbox>,
 }
 
 #[allow(dead_code)]
@@ -36,6 +38,7 @@ impl Sandbox {
         identity: String,
         limits: ResourceLimits,
         timeout: Option<Duration>,
+        #[cfg(windows)] appcontainer: Option<crate::backend::appcontainer::AppContainerSandbox>,
     ) -> Self {
         Self {
             workspace,
@@ -44,6 +47,8 @@ impl Sandbox {
             identity,
             limits,
             timeout,
+            #[cfg(windows)]
+            appcontainer,
         }
     }
 
@@ -75,6 +80,13 @@ impl Sandbox {
 
     pub(crate) fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn appcontainer(
+        &self,
+    ) -> Option<&crate::backend::appcontainer::AppContainerSandbox> {
+        self.appcontainer.as_ref()
     }
 
     /// Backends that are usable on this machine, probed live.

@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::backend;
 use crate::filesystem::FilesystemPlan;
 use crate::sandbox::Sandbox;
-use crate::{BackendPreference, ResourceLimits, SandboxError};
+use crate::{BackendKind, BackendPreference, ResourceLimits, SandboxError};
 
 /// Validates and builds a reusable [`Sandbox`].
 pub struct SandboxBuilder {
@@ -88,6 +88,13 @@ impl SandboxBuilder {
         backend::validate(&backend_kind, &plan)?;
         let identity = self.identity.unwrap_or_else(generate_sandbox_identity);
 
+        #[cfg(windows)]
+        let appcontainer = if backend_kind == BackendKind::AppContainer {
+            Some(backend::appcontainer::build_state(&identity, &plan)?)
+        } else {
+            None
+        };
+
         Ok(Sandbox::new(
             self.workspace,
             plan,
@@ -98,6 +105,8 @@ impl SandboxBuilder {
                 max_memory: self.max_memory,
             },
             self.timeout,
+            #[cfg(windows)]
+            appcontainer,
         ))
     }
 }
