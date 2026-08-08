@@ -45,7 +45,6 @@ fn apply_baseline_readonly(profile: &rappct::AppContainerProfile) {
         "ProgramFiles(x86)",
         "CommonProgramFiles",
         "CommonProgramFiles(x86)",
-        "LOCALAPPDATA",
     ] {
         if let Some(value) = std::env::var_os(env) {
             let path = Path::new(&value);
