@@ -24,8 +24,7 @@ pub(crate) fn launch_probe() -> Result<(), String> {
     let result = (|| {
         fs::create_dir_all(&workspace).map_err(|err| err.to_string())?;
 
-        let plan = FilesystemPlan::compile(&workspace, &[PathBuf::from(system_root.clone())], &[])
-            .map_err(|err| err.to_string())?;
+        let plan = FilesystemPlan::compile(&workspace, &[], &[]).map_err(|err| err.to_string())?;
         let profile = rappct::AppContainerProfile::ensure(&identity, &identity, None)
             .map_err(|err| err.to_string())?;
         let result = (|| {
