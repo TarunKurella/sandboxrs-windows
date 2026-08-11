@@ -52,7 +52,7 @@ impl Sandbox {
         }
     }
 
-    /// Create a command inside this sandbox.
+    /// Create a command that will execute inside this sandbox.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> SandboxCommand<'_> {
         SandboxCommand::new(self, program.as_ref())
     }
@@ -90,6 +90,8 @@ impl Sandbox {
     }
 
     /// Backends that are usable on this machine, probed live.
+    ///
+    /// This does not select a backend or create a sandbox profile.
     pub fn available_backends() -> Vec<BackendKind> {
         backend::probe_report(BackendPreference::Auto)
             .entries
@@ -108,13 +110,19 @@ impl Sandbox {
 /// Result of probing sandbox backends.
 #[derive(Debug, Clone)]
 pub struct BackendProbe {
+    /// One live probe result for each supported backend.
     pub entries: Vec<BackendProbeEntry>,
 }
 
+/// Result of probing one sandbox backend.
 #[derive(Debug, Clone)]
 pub struct BackendProbeEntry {
+    /// Backend represented by this entry.
     pub backend: BackendKind,
+    /// Whether the backend's entry point could be found.
     pub export_present: bool,
+    /// Whether the backend passed its real launch probe.
     pub usable: bool,
+    /// Human-readable probe detail suitable for diagnostics.
     pub detail: String,
 }

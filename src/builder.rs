@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::backend;
 use crate::filesystem::FilesystemPlan;
 use crate::sandbox::Sandbox;
-use crate::{BackendKind, BackendPreference, ResourceLimits, SandboxError};
+#[cfg(windows)]
+use crate::BackendKind;
+use crate::{BackendPreference, ResourceLimits, SandboxError};
 
 /// Validates and builds a reusable [`Sandbox`].
 pub struct SandboxBuilder {
@@ -68,11 +71,10 @@ impl SandboxBuilder {
         self
     }
 
-    /// Explicit AppContainer identity/profile name.
+    /// Set a diagnostic label for this sandbox identity.
     ///
-    /// Defaults to a unique `sandbox-<hex>` name when omitted. Two sandboxes
-    /// sharing an identity share an AppContainer profile and therefore its
-    /// filesystem permissions.
+    /// A unique suffix is always appended. Reusing a label never reuses an
+    /// AppContainer profile or leaks filesystem grants between sandboxes.
     pub fn identity(mut self, identity: impl Into<String>) -> Self {
         self.identity = Some(identity.into());
         self
@@ -86,7 +88,7 @@ impl SandboxBuilder {
         let plan = FilesystemPlan::compile(&self.workspace, &self.read_only, &self.read_write)?;
         let backend_kind = backend::select(self.preferred_backend)?;
         backend::validate(&backend_kind, &plan)?;
-        let identity = self.identity.unwrap_or_else(generate_sandbox_identity);
+        let identity = generate_sandbox_identity(self.identity.as_deref());
 
         #[cfg(windows)]
         let appcontainer = if backend_kind == BackendKind::AppContainer {
@@ -111,10 +113,29 @@ impl SandboxBuilder {
     }
 }
 
-fn generate_sandbox_identity() -> String {
+fn generate_sandbox_identity(label: Option<&str>) -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or_else(|_| std::process::id() as u64);
-    format!("sandbox-{nonce:016x}")
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let prefix = label.filter(|value| !value.is_empty()).unwrap_or("sandbox");
+    format!(
+        "{prefix}-{:08x}-{nonce:016x}-{sequence:016x}",
+        std::process::id()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_sandbox_identity;
+
+    #[test]
+    fn identity_labels_do_not_reuse_profiles() {
+        assert_ne!(
+            generate_sandbox_identity(Some("shared-label")),
+            generate_sandbox_identity(Some("shared-label"))
+        );
+    }
 }

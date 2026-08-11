@@ -15,18 +15,18 @@ pub(crate) fn select(preference: BackendPreference) -> Result<BackendKind, Sandb
     #[cfg(not(windows))]
     {
         let _ = preference;
-        return Err(SandboxError::UnsupportedPlatform);
+        Err(SandboxError::UnsupportedPlatform)
     }
 
     #[cfg(windows)]
-    let report = probe_report(preference);
-    #[cfg(windows)]
-    report
-        .entries
-        .into_iter()
-        .find(|entry| entry.usable)
-        .map(|entry| entry.backend)
-        .ok_or(SandboxError::SandboxUnavailable)
+    {
+        probe_report(preference)
+            .entries
+            .into_iter()
+            .find(|entry| entry.usable)
+            .map(|entry| entry.backend)
+            .ok_or(SandboxError::SandboxUnavailable)
+    }
 }
 
 /// Validate that the selected backend can represent the filesystem plan.
@@ -67,6 +67,10 @@ pub(crate) fn probe_report(preference: BackendPreference) -> BackendProbe {
     BackendProbe { entries }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public command builder stores these independent process attributes"
+)]
 pub(crate) fn spawn(
     sandbox: &Sandbox,
     program: OsString,

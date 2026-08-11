@@ -12,23 +12,37 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_PIPE_CONNECTED, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertStringSidToSidW,
+};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-use windows_sys::Win32::Security::{PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
+    SID_AND_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_INBOUND,
+    PIPE_ACCESS_OUTBOUND,
+};
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
-use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread,
-    UpdateProcThreadAttribute, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
+    InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, UpdateProcThreadAttribute,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::child::SandboxChild;
@@ -44,6 +58,7 @@ struct StdioSetup {
     stdout_parent: Option<File>,
     stderr_parent: Option<File>,
     child_handles: Vec<HANDLE>,
+    owned_child_handles: Vec<HANDLE>,
     keepalive: Vec<File>,
 }
 
@@ -57,6 +72,77 @@ enum IoSlot {
 struct SecurityCaps {
     capabilities: SECURITY_CAPABILITIES,
     sid: HLOCAL,
+}
+
+/// Heap-backed descriptor used only while creating the private named pipes.
+///
+/// The descriptor grants the parent user and this exact AppContainer profile
+/// access. The untrusted mandatory label permits the AppContainer's lower
+/// integrity token to use the inherited pipe endpoints.
+struct PipeSecurityDescriptor {
+    descriptor: HLOCAL,
+}
+
+impl PipeSecurityDescriptor {
+    fn new(appcontainer_sid: &str) -> Result<Self, SandboxError> {
+        let user_sid = current_user_sid()?;
+        let sddl = format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;{appcontainer_sid})S:(ML;;NW;;;UN)");
+        let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut descriptor_len = 0u32;
+        // SAFETY: `wide` is a valid NUL-terminated SDDL string and the output
+        // pointers are valid. The successful allocation is released by Drop.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                1,
+                &mut descriptor,
+                &mut descriptor_len,
+            )
+        };
+        if ok == 0 || descriptor.is_null() {
+            return Err(SandboxError::Io(io::Error::last_os_error()));
+        }
+        Ok(Self {
+            descriptor: descriptor as HLOCAL,
+        })
+    }
+
+    fn as_ptr(&self) -> PSECURITY_DESCRIPTOR {
+        self.descriptor.cast()
+    }
+}
+
+impl Drop for PipeSecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor was allocated by the SDDL conversion API and
+        // is freed exactly once after all pipe creation calls finish.
+        unsafe {
+            let _ = LocalFree(self.descriptor);
+        }
+    }
+}
+
+impl StdioSetup {
+    fn close_owned_child_handles(&mut self) {
+        for handle in self.owned_child_handles.drain(..) {
+            if !handle.is_null() {
+                // SAFETY: this is a child-side named-pipe handle created by
+                // this setup and no longer needed once process creation ends.
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for StdioSetup {
+    fn drop(&mut self) {
+        // Close child endpoints on both success and failure paths. Inherited
+        // console handles are deliberately not in this list.
+        self.close_owned_child_handles();
+    }
 }
 
 impl SecurityCaps {
@@ -116,16 +202,20 @@ pub(crate) fn spawn(
     let exe = resolve_program(&program)?;
     let command_line = build_command_line(&exe, &args)?;
     let env_block = build_env_block(env_clear, &envs, &removals);
-    let current_dir = current_dir
-        .as_deref()
-        .and_then(|path| path.to_str())
-        .map(|value| {
+    let current_dir = current_dir.as_deref().map(|path| {
+        let value = path.to_str().ok_or_else(|| SandboxError::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "working directory is not valid Unicode".into(),
+        })?;
+        Ok::<_, SandboxError>(
             value
                 .encode_utf16()
                 .chain(std::iter::once(0))
-                .collect::<Vec<_>>()
-        });
-    let stdio = setup_stdio(stdin, stdout, stderr)?;
+                .collect::<Vec<_>>(),
+        )
+    });
+    let current_dir = current_dir.transpose()?;
+    let mut stdio = setup_stdio(stdin, stdout, stderr, appcontainer.profile.sid.as_string())?;
     let limits = sandbox.limits();
     let timeout = sandbox.timeout();
 
@@ -139,15 +229,20 @@ pub(crate) fn spawn(
         limits,
     )?;
 
+    // Keeping a parent copy of a child pipe endpoint suppresses EOF forever.
+    // Close only the handles this setup created; never close inherited console
+    // handles owned by the host process.
+    stdio.close_owned_child_handles();
+
     Ok(SandboxChild::new(
         BackendKind::AppContainer,
         spawned.process,
         spawned.thread,
         spawned.pid,
         spawned.job,
-        stdio.stdin_parent,
-        stdio.stdout_parent,
-        stdio.stderr_parent,
+        stdio.stdin_parent.take(),
+        stdio.stdout_parent.take(),
+        stdio.stderr_parent.take(),
         timeout,
     ))
 }
@@ -359,20 +454,32 @@ fn terminate_and_reap(process: HANDLE, thread: HANDLE) {
     }
 }
 
-fn setup_stdio(stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Result<StdioSetup, SandboxError> {
+fn setup_stdio(
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    appcontainer_sid: &str,
+) -> Result<StdioSetup, SandboxError> {
+    let needs_pipe_security = matches!(stdin, Stdio::Piped)
+        || matches!(stdout, Stdio::Piped)
+        || matches!(stderr, Stdio::Piped);
+    let pipe_security = needs_pipe_security
+        .then(|| PipeSecurityDescriptor::new(appcontainer_sid))
+        .transpose()?;
     let mut setup = StdioSetup {
         startup: unsafe { std::mem::zeroed() },
         stdin_parent: None,
         stdout_parent: None,
         stderr_parent: None,
         child_handles: Vec::new(),
+        owned_child_handles: Vec::new(),
         keepalive: Vec::new(),
     };
 
     setup.startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    let stdin_child = prepare_handle(stdin, IoSlot::Stdin, &mut setup)?;
-    let stdout_child = prepare_handle(stdout, IoSlot::Stdout, &mut setup)?;
-    let stderr_child = prepare_handle(stderr, IoSlot::Stderr, &mut setup)?;
+    let stdin_child = prepare_handle(stdin, IoSlot::Stdin, &mut setup, pipe_security.as_ref())?;
+    let stdout_child = prepare_handle(stdout, IoSlot::Stdout, &mut setup, pipe_security.as_ref())?;
+    let stderr_child = prepare_handle(stderr, IoSlot::Stderr, &mut setup, pipe_security.as_ref())?;
 
     setup.startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     setup.startup.StartupInfo.hStdInput = stdin_child;
@@ -385,6 +492,7 @@ fn prepare_handle(
     mode: Stdio,
     slot: IoSlot,
     setup: &mut StdioSetup,
+    pipe_security: Option<&PipeSecurityDescriptor>,
 ) -> Result<HANDLE, SandboxError> {
     match mode {
         Stdio::Inherit => {
@@ -415,29 +523,21 @@ fn prepare_handle(
             Ok(handle)
         }
         Stdio::Piped => {
-            let attributes = SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: std::ptr::null_mut(),
-                bInheritHandle: 1,
-            };
-            let mut read_end: HANDLE = std::ptr::null_mut();
-            let mut write_end: HANDLE = std::ptr::null_mut();
-            // SAFETY: Both out-parameters are valid and `attributes` is fully
-            // initialized.
-            let ok = unsafe { CreatePipe(&mut read_end, &mut write_end, &attributes, 0) };
-            if ok == 0 {
-                return Err(SandboxError::Io(io::Error::last_os_error()));
+            let security = pipe_security.ok_or_else(|| SandboxError::PolicyCompileFailed {
+                backend: BackendKind::AppContainer,
+                reason: "missing named-pipe security descriptor".into(),
+            })?;
+            let (file, child_end) = create_piped_handle(slot, security)?;
+            if let Err(err) = make_inheritable(child_end) {
+                // SAFETY: `child_end` is owned by this setup until it is
+                // successfully registered for launch below.
+                unsafe {
+                    let _ = CloseHandle(child_end);
+                }
+                return Err(err);
             }
-
-            let (child_end, parent_end) = match slot {
-                IoSlot::Stdin => (write_end, read_end),
-                IoSlot::Stdout | IoSlot::Stderr => (read_end, write_end),
-            };
-            // SAFETY: `parent_end` is a valid pipe handle created above and
-            // ownership transfers to the returned File.
-            let file = unsafe { File::from_raw_handle(parent_end as RawHandle) };
-            make_inheritable(child_end)?;
             setup.child_handles.push(child_end);
+            setup.owned_child_handles.push(child_end);
             match slot {
                 IoSlot::Stdin => setup.stdin_parent = Some(file),
                 IoSlot::Stdout => setup.stdout_parent = Some(file),
@@ -446,6 +546,168 @@ fn prepare_handle(
             Ok(child_end)
         }
     }
+}
+
+fn create_piped_handle(
+    slot: IoSlot,
+    security: &PipeSecurityDescriptor,
+) -> Result<(File, HANDLE), SandboxError> {
+    let name = next_pipe_name(slot);
+    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let server_access = match slot {
+        IoSlot::Stdin => PIPE_ACCESS_INBOUND,
+        IoSlot::Stdout | IoSlot::Stderr => PIPE_ACCESS_OUTBOUND,
+    };
+    let client_access = match slot {
+        IoSlot::Stdin => GENERIC_WRITE,
+        IoSlot::Stdout | IoSlot::Stderr => GENERIC_READ,
+    };
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: security.as_ptr(),
+        bInheritHandle: 0,
+    };
+
+    // Use a named pipe rather than CreatePipe so the full security descriptor,
+    // including its mandatory integrity label, is applied to the pipe object.
+    let server = unsafe {
+        CreateNamedPipeW(
+            wide_name.as_ptr(),
+            server_access | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            &attributes,
+        )
+    };
+    if server == INVALID_HANDLE_VALUE {
+        return Err(SandboxError::Io(io::Error::last_os_error()));
+    }
+
+    // The parent opens the client endpoint before process creation, then the
+    // handle list transfers it to the AppContainer child.
+    let client = unsafe {
+        CreateFileW(
+            wide_name.as_ptr(),
+            client_access,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if client == INVALID_HANDLE_VALUE {
+        let error = io::Error::last_os_error();
+        unsafe {
+            let _ = CloseHandle(server);
+        }
+        return Err(SandboxError::Io(error));
+    }
+
+    // Opening the client end races ConnectNamedPipe by design; a successful
+    // connection is reported as ERROR_PIPE_CONNECTED in that case.
+    let connected = unsafe { ConnectNamedPipe(server, std::ptr::null_mut()) };
+    let connect_error = unsafe { GetLastError() };
+    if connected == 0 && connect_error != ERROR_PIPE_CONNECTED {
+        let error = io::Error::from_raw_os_error(connect_error as i32);
+        unsafe {
+            let _ = CloseHandle(client);
+            let _ = CloseHandle(server);
+        }
+        return Err(SandboxError::Io(error));
+    }
+
+    // SAFETY: `server` is the parent endpoint and ownership transfers to the
+    // returned File. `client` remains a raw child endpoint until launch ends.
+    Ok((
+        unsafe { File::from_raw_handle(server as RawHandle) },
+        client,
+    ))
+}
+
+fn next_pipe_name(slot: IoSlot) -> String {
+    static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(0);
+    let slot = match slot {
+        IoSlot::Stdin => "stdin",
+        IoSlot::Stdout => "stdout",
+        IoSlot::Stderr => "stderr",
+    };
+    let sequence = NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        r"\\.\pipe\sandboxrs-{}-{nonce:x}-{sequence:x}-{slot}",
+        std::process::id()
+    )
+}
+
+fn current_user_sid() -> Result<String, SandboxError> {
+    let mut token = std::ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle valid for this call;
+    // `token` is a valid out-parameter and is closed below.
+    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if opened == 0 {
+        return Err(SandboxError::Io(io::Error::last_os_error()));
+    }
+
+    let result = (|| {
+        let mut required = 0u32;
+        // SAFETY: This sizing call intentionally has a null buffer.
+        unsafe {
+            let _ = GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+        }
+        if required == 0 {
+            return Err(SandboxError::Io(io::Error::last_os_error()));
+        }
+        let mut buffer = vec![0u8; required as usize];
+        // SAFETY: `buffer` is large enough according to the sizing call.
+        let read = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        };
+        if read == 0 {
+            return Err(SandboxError::Io(io::Error::last_os_error()));
+        }
+        // TOKEN_USER may not be aligned to Rust's stricter reference rules in
+        // a Vec<u8>, so copy the C header with an unaligned read.
+        let user = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
+        let mut string_sid = std::ptr::null_mut();
+        // SAFETY: `user.User.Sid` points into the live token-information
+        // buffer. The successful allocation is released before returning.
+        let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &mut string_sid) };
+        if converted == 0 || string_sid.is_null() {
+            return Err(SandboxError::Io(io::Error::last_os_error()));
+        }
+        let mut len = 0usize;
+        // SAFETY: ConvertSidToStringSidW returns a NUL-terminated wide string.
+        unsafe {
+            while *string_sid.add(len) != 0 {
+                len += 1;
+            }
+        }
+        let value =
+            unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(string_sid, len)) };
+        unsafe {
+            let _ = LocalFree(string_sid.cast());
+        }
+        Ok(value)
+    })();
+
+    // SAFETY: OpenProcessToken returned this owned token handle above.
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    result
 }
 
 fn make_inheritable(handle: HANDLE) -> Result<(), SandboxError> {

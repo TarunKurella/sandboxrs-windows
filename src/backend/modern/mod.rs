@@ -26,7 +26,7 @@ pub(crate) struct ProbeOutcome {
 
 pub(crate) fn probe() -> ProbeOutcome {
     static PROBE: OnceLock<ProbeOutcome> = OnceLock::new();
-    PROBE.get_or_init(|| build_probe()).clone()
+    PROBE.get_or_init(build_probe).clone()
 }
 
 fn build_probe() -> ProbeOutcome {

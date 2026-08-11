@@ -74,6 +74,7 @@ impl SandboxChild {
         }
     }
 
+    /// Return the root process ID while it is available.
     pub fn id(&self) -> Option<u32> {
         #[cfg(windows)]
         {
@@ -86,10 +87,12 @@ impl SandboxChild {
         }
     }
 
+    /// Return the backend enforcing this child process tree.
     pub fn backend(&self) -> BackendKind {
         self.backend
     }
 
+    /// Check whether the root process has exited without blocking.
     pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, SandboxError> {
         #[cfg(windows)]
         {
@@ -121,6 +124,10 @@ impl SandboxChild {
         }
     }
 
+    /// Wait for completion, applying the configured timeout when present.
+    ///
+    /// A timeout terminates the entire Job Object before this method returns
+    /// the final process status.
     pub fn wait(&mut self) -> Result<std::process::ExitStatus, SandboxError> {
         #[cfg(windows)]
         {
@@ -143,6 +150,7 @@ impl SandboxChild {
         }
     }
 
+    /// Terminate every process in the sandboxed Job Object.
     pub fn kill(&mut self) -> Result<(), SandboxError> {
         #[cfg(windows)]
         {
@@ -156,6 +164,10 @@ impl SandboxChild {
         }
     }
 
+    /// Wait for completion while draining configured stdout and stderr pipes.
+    ///
+    /// Streams configured as [`crate::Stdio::Inherit`] or [`crate::Stdio::Null`]
+    /// produce empty byte vectors in the returned [`SandboxOutput`].
     pub fn wait_with_output(&mut self) -> Result<SandboxOutput, SandboxError> {
         #[cfg(windows)]
         {

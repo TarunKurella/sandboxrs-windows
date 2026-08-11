@@ -26,9 +26,6 @@ inside a validated, reusable authority boundary. It prefers Windows' modern
 composable sandbox API when available and falls back to a regular AppContainer
 without requiring administrator privileges.
 
-![Windows CI](https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/windows.yml/badge.svg)
-![Security evals](https://github.com/TarunKurella/sandboxrs-windows/actions/workflows/security-evals.yml/badge.svg)
-
 ```rust
 use sandboxrs_windows::{Sandbox, Stdio};
 
@@ -121,6 +118,12 @@ Key types:
 
 `std::process::Stdio` is opaque, so the crate exposes its own
 `sandboxrs_windows::Stdio::{inherit, null, piped}`.
+
+`spawn()` inherits standard streams by default. `output()` follows
+`std::process::Command::output()`: stdin defaults to `null`, stdout and stderr
+default to `piped`, and any explicit stream setting wins. The detailed
+[API guide](docs/API.md) covers these defaults, lifecycle behavior, backend
+selection, and errors.
 
 ## Filesystem policy
 

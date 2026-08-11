@@ -22,6 +22,17 @@ enum Command {
     },
 }
 
+struct ExecOptions {
+    json: bool,
+    workspace: PathBuf,
+    read_only: Vec<PathBuf>,
+    read_write: Vec<PathBuf>,
+    timeout_ms: Option<u64>,
+    max_memory_bytes: Option<u64>,
+    max_processes: Option<u32>,
+    argv: Vec<String>,
+}
+
 fn main() -> ExitCode {
     if std::env::var_os("SANDBOXRS_PROBE_SELF").is_some() {
         println!("probe-ok");
@@ -38,7 +49,7 @@ fn main() -> ExitCode {
             max_memory_bytes,
             max_processes,
             argv,
-        }) => run_exec(
+        }) => run_exec(ExecOptions {
             json,
             workspace,
             read_only,
@@ -47,7 +58,7 @@ fn main() -> ExitCode {
             max_memory_bytes,
             max_processes,
             argv,
-        ),
+        }),
         Err(message) => {
             eprintln!("sandboxrs: {message}");
             eprintln!("usage:");
@@ -108,16 +119,17 @@ fn run_doctor(json: bool) -> ExitCode {
     }
 }
 
-fn run_exec(
-    json: bool,
-    workspace: PathBuf,
-    read_only: Vec<PathBuf>,
-    read_write: Vec<PathBuf>,
-    timeout_ms: Option<u64>,
-    max_memory_bytes: Option<u64>,
-    max_processes: Option<u32>,
-    argv: Vec<String>,
-) -> ExitCode {
+fn run_exec(options: ExecOptions) -> ExitCode {
+    let ExecOptions {
+        json,
+        workspace,
+        read_only,
+        read_write,
+        timeout_ms,
+        max_memory_bytes,
+        max_processes,
+        argv,
+    } = options;
     if argv.is_empty() {
         eprintln!("sandboxrs: exec requires a command after '--'");
         return ExitCode::from(2);

@@ -4,14 +4,23 @@
 //! roots needed to launch executables are granted read/execute best-effort;
 //! user policy is never flattened silently.
 
+#[cfg(windows)]
 use std::path::Path;
 
-use crate::filesystem::{Access, FilesystemPlan};
-use crate::{BackendKind, SandboxError};
+#[cfg(windows)]
+use crate::filesystem::Access;
+#[cfg(windows)]
+use crate::filesystem::FilesystemPlan;
+#[cfg(windows)]
+use crate::BackendKind;
+#[cfg(windows)]
+use crate::SandboxError;
 
+#[cfg(windows)]
 const FILE_GENERIC_READ: u32 = 0x0012_0089;
-const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+#[cfg(windows)]
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
+#[cfg(windows)]
 const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 
 #[cfg(windows)]
@@ -82,9 +91,4 @@ fn grant_recursive(
         }
     }
     Ok(())
-}
-
-#[cfg(not(windows))]
-pub(crate) fn apply_grants(_plan: &FilesystemPlan, _profile: &()) -> Result<(), SandboxError> {
-    Err(SandboxError::UnsupportedPlatform)
 }

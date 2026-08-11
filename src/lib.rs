@@ -1,5 +1,9 @@
 //! No-admin Windows process sandbox library with a `std::process::Command`-like API.
 //!
+//! The [API guide](https://github.com/TarunKurella/sandboxrs-windows/blob/main/docs/API.md)
+//! documents stream defaults, backend selection, lifecycle behavior, and the
+//! error model.
+//!
 //! ```no_run
 //! use sandboxrs_windows::Sandbox;
 //!
@@ -39,20 +43,26 @@ pub use sandbox::{BackendProbe, BackendProbeEntry, Sandbox};
 /// inspected by a library after it is passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stdio {
+    /// Attach the corresponding standard handle inherited by the host process.
     Inherit,
+    /// Connect the stream to `NUL`.
     Null,
+    /// Create a parent-visible pipe for the stream.
     Piped,
 }
 
 impl Stdio {
+    /// Inherit the host process's corresponding standard stream.
     pub fn inherit() -> Self {
         Self::Inherit
     }
 
+    /// Connect the stream to `NUL`.
     pub fn null() -> Self {
         Self::Null
     }
 
+    /// Create a pipe that is exposed on [`SandboxChild`].
     pub fn piped() -> Self {
         Self::Piped
     }
@@ -61,7 +71,9 @@ impl Stdio {
 /// Backend that enforces a sandboxed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendKind {
+    /// The experimental composable Windows Sandbox API.
     WindowsSandboxApi,
+    /// A regular AppContainer profile launched with `SECURITY_CAPABILITIES`.
     AppContainer,
 }
 
@@ -74,6 +86,7 @@ impl BackendKind {
         }
     }
 
+    /// Human-readable backend name for logs and diagnostics.
     pub fn label(self) -> &'static str {
         match self {
             Self::WindowsSandboxApi => "Windows Sandbox API",
@@ -85,8 +98,11 @@ impl BackendKind {
 /// Backend selection preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendPreference {
+    /// Probe the modern API first, then use AppContainer when it is usable.
     Auto,
+    /// Require the experimental composable Windows Sandbox API.
     WindowsSandboxApi,
+    /// Require the AppContainer backend.
     AppContainer,
 }
 

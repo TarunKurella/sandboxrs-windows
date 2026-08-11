@@ -69,8 +69,14 @@ pub(crate) fn spawn(
     let env_block = build_env_block(env_clear, &envs, &removals);
     let current_dir = current_dir
         .as_deref()
-        .and_then(|path| path.to_str())
-        .map(to_wide);
+        .map(|path| {
+            let value = path.to_str().ok_or_else(|| SandboxError::InvalidPath {
+                path: path.to_path_buf(),
+                reason: "working directory is not valid Unicode".into(),
+            })?;
+            Ok::<_, SandboxError>(to_wide(value))
+        })
+        .transpose()?;
 
     let stdio = setup_stdio(stdin, stdout, stderr)?;
     let limits = sandbox.limits();

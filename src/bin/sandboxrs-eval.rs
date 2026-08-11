@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(windows),
+    allow(dead_code, unused_assignments, unused_imports, unused_variables)
+)]
+
 use std::fmt;
 #[cfg(windows)]
 use std::fs;

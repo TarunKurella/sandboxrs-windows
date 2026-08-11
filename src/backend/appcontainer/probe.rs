@@ -120,6 +120,7 @@ pub(crate) fn launch_probe() -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub(crate) fn launch_probe() -> Result<(), String> {
     Err("AppContainer probe requires Windows".into())
 }
