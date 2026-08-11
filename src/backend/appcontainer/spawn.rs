@@ -86,7 +86,8 @@ struct PipeSecurityDescriptor {
 impl PipeSecurityDescriptor {
     fn new(appcontainer_sid: &str) -> Result<Self, SandboxError> {
         let user_sid = current_user_sid()?;
-        let sddl = format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;{appcontainer_sid})S:(ML;;NW;;;UN)");
+        let sddl =
+            format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;{appcontainer_sid})S:(ML;;NW;;;S-1-16-0)");
         let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         let mut descriptor_len = 0u32;
