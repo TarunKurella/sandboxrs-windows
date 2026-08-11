@@ -556,12 +556,14 @@ fn create_piped_handle(
     let name = next_pipe_name(slot);
     let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let server_access = match slot {
-        IoSlot::Stdin => PIPE_ACCESS_INBOUND,
-        IoSlot::Stdout | IoSlot::Stderr => PIPE_ACCESS_OUTBOUND,
+        // The host owns the server endpoint. It writes stdin and reads the
+        // child's stdout/stderr; the inherited client end has the inverse.
+        IoSlot::Stdin => PIPE_ACCESS_OUTBOUND,
+        IoSlot::Stdout | IoSlot::Stderr => PIPE_ACCESS_INBOUND,
     };
     let client_access = match slot {
-        IoSlot::Stdin => GENERIC_WRITE,
-        IoSlot::Stdout | IoSlot::Stderr => GENERIC_READ,
+        IoSlot::Stdin => GENERIC_READ,
+        IoSlot::Stdout | IoSlot::Stderr => GENERIC_WRITE,
     };
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
